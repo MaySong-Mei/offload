@@ -68,7 +68,7 @@ struct RootView: View {
             }
         }
         .sheet(isPresented: $showingNewTopicSheet) {
-            NewTopicSheet(model: model)
+            NewTopicSheet(model: model, parentTopic: nil)
         }
         .task {
             model.bootstrap()
@@ -117,6 +117,7 @@ private struct ConnectionPanel: View {
 private struct NewTopicSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: AppModel
+    let parentTopic: TopicSummary?
     @State private var title = ""
     @State private var rawInput = ""
     @State private var tagsText = ""
@@ -124,12 +125,20 @@ private struct NewTopicSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                if let parentTopic {
+                    Section("Parent Topic") {
+                        Text(parentTopic.title)
+                        Text(parentTopic.summary)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 TextField("Title", text: $title)
                 TextField("Tags, comma separated", text: $tagsText)
                 TextEditor(text: $rawInput)
                     .frame(minHeight: 220)
             }
-            .navigationTitle("New Topic")
+            .navigationTitle(parentTopic == nil ? "New Topic" : "New Subtopic")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -137,7 +146,12 @@ private struct NewTopicSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") {
                         Task {
-                            await model.createTopic(title: title, rawInput: rawInput, tagsText: tagsText)
+                            await model.createTopic(
+                                title: title,
+                                rawInput: rawInput,
+                                tagsText: tagsText,
+                                parentTopicID: parentTopic?.topicId
+                            )
                             dismiss()
                         }
                     }
@@ -153,9 +167,14 @@ private struct TopicDetailView: View {
     let detail: TopicDetailResponse
     @State private var refreshNote = ""
     @State private var commandText = "/usr/bin/printf hello-from-ios"
+    @State private var showingNewSubtopicSheet = false
 
     private var pendingFeedback: [FeedbackRequestModel] {
         detail.feedbackRequests.filter { $0.status == "pending" }
+    }
+
+    private var canArchive: Bool {
+        detail.topic.executionState == .passed && detail.topic.decisionState != .archived
     }
 
     var body: some View {
@@ -173,6 +192,15 @@ private struct TopicDetailView: View {
                             StatusChip(text: detail.topic.executionState.rawValue)
                             StatusChip(text: detail.topic.decisionState.rawValue)
                         }
+                        if let parentTopic = detail.parentTopic {
+                            Button {
+                                model.selectTopic(parentTopic.topicId)
+                            } label: {
+                                Label("Parent: \(parentTopic.title)", systemImage: "arrow.turn.up.left")
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.subheadline)
+                        }
                     }
                     Spacer()
                 }
@@ -181,6 +209,11 @@ private struct TopicDetailView: View {
                     Text("Actions")
                         .font(.headline)
                     HStack {
+                        Button("New Subtopic") {
+                            showingNewSubtopicSheet = true
+                        }
+                        .buttonStyle(.borderedProminent)
+
                         Button("Approve Requirement") {
                             Task { await model.approveRequirement() }
                         }
@@ -206,16 +239,27 @@ private struct TopicDetailView: View {
                         }
                         .buttonStyle(.bordered)
 
-                        Button("Mark Human Testing") {
+                        Button("Start Human Testing") {
                             Task { await model.markHumanTesting() }
                         }
                         .buttonStyle(.bordered)
 
-                        Button("Mark Passed") {
+                        Button("Confirm Passed") {
                             Task { await model.markPassed() }
                         }
                         .buttonStyle(.bordered)
                     }
+
+                    if canArchive {
+                        Button("Archive Topic") {
+                            Task { await model.archiveTopic() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+
+                    Text("Archive is only available after a human testing review marks the topic as passed.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
 
                     TextField("Command to run", text: $commandText)
                         .textFieldStyle(.roundedBorder)
@@ -236,6 +280,31 @@ private struct TopicDetailView: View {
                             .font(.headline)
                         ForEach(pendingFeedback) { request in
                             FeedbackRequestCard(model: model, request: request)
+                        }
+                    }
+                }
+
+                if !detail.childTopics.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Subtopics")
+                            .font(.headline)
+                        ForEach(detail.childTopics) { child in
+                            Button {
+                                model.selectTopic(child.topicId)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(child.title)
+                                        .font(.headline)
+                                    Text(child.summary)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding()
+                                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -275,6 +344,9 @@ private struct TopicDetailView: View {
             .padding(24)
         }
         .navigationTitle(detail.topic.title)
+        .sheet(isPresented: $showingNewSubtopicSheet) {
+            NewTopicSheet(model: model, parentTopic: detail.topic)
+        }
     }
 }
 
@@ -348,4 +420,3 @@ private struct StatusChip: View {
             .background(Color.accentColor.opacity(0.14), in: Capsule())
     }
 }
-

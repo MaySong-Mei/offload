@@ -77,19 +77,30 @@ class HarnessService:
         tags: Optional[List[str]] = None,
         priority: str = "normal",
         project: Optional[str] = None,
+        parent_topic_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             now = utc_now()
             topic_id = f"topic-{uuid.uuid4().hex[:10]}"
+            parent_state = None
+            parent_tags: List[str] = []
+            inherited_project = project
+            shared_context = None
+            if parent_topic_id:
+                parent_state = self._require_topic(parent_topic_id)
+                parent_tags = list(parent_state.tags)
+                inherited_project = project if project is not None else parent_state.project
+                shared_context = self._build_parent_context(parent_topic_id)
             summary = raw_input.strip().splitlines()[0][:180]
             state = TopicState(
                 topic_id=topic_id,
                 title=title.strip() or summary or "Untitled topic",
                 summary=summary or "New topic captured from controller input.",
                 raw_input=raw_input.strip(),
-                tags=list(tags or []),
+                parent_topic_id=parent_topic_id,
+                tags=self._merge_tags(parent_tags, list(tags or [])),
                 priority=priority,
-                project=project,
+                project=inherited_project,
                 created_at=now,
                 updated_at=now,
                 requirement_state=RequirementState.CLARIFYING,
@@ -97,14 +108,19 @@ class HarnessService:
                 decision_state=DecisionState.NEEDS_FEEDBACK,
                 workspace_path=str(self.workspace.topic_dir(topic_id)),
             )
-            documents = self.planner.initial_documents(state)
+            documents = self.planner.initial_documents(state, shared_context=shared_context)
             initial_request = self.planner.requirement_feedback_request(topic_id)
             state.pending_feedback_request_id = initial_request.request_id
             self.workspace.create_topic(state, documents)
             self.workspace.save_feedback_request(initial_request)
             self.store.upsert_topic(state)
             self.store.upsert_feedback_request(initial_request)
-            topic_event = self._record_event("topic.created", topic_id=topic_id, payload={"topic": state.to_json_dict()})
+            topic_event_type = "topic.subtopic_created" if parent_topic_id else "topic.created"
+            topic_event = self._record_event(
+                topic_event_type,
+                topic_id=topic_id,
+                payload={"topic": state.to_json_dict(), "parent_topic_id": parent_topic_id},
+            )
             feedback_event = self._record_event(
                 "feedback.requested",
                 topic_id=topic_id,
@@ -129,8 +145,12 @@ class HarnessService:
             feedback_requests = [request.to_json_dict() for request in self.store.list_feedback_requests(topic_id=topic_id)]
             runs = [run.to_json_dict() for run in self.store.list_runs(topic_id)]
             artifacts = self.workspace.list_artifacts(topic_id)
+            parent_topic = self.store.get_topic(state.parent_topic_id) if state.parent_topic_id else None
+            child_topics = [child.to_json_dict() for child in self.store.list_child_topics(topic_id)]
             return {
                 "topic": state.to_json_dict(),
+                "parent_topic": parent_topic.to_json_dict() if parent_topic else None,
+                "child_topics": child_topics,
                 "documents": documents,
                 "feedback_requests": feedback_requests,
                 "runs": runs,
@@ -150,11 +170,16 @@ class HarnessService:
     def refresh_requirement(self, topic_id: str, note: str = "") -> Dict[str, Any]:
         with self._lock:
             state = self._require_topic(topic_id)
+            self._ensure_not_archived(state)
             state.requirement_state = RequirementState.SPECIFIED
             state.decision_state = DecisionState.NEEDS_FEEDBACK
             state.requirement_approved_at = None
             state.updated_at = utc_now()
-            requirement = self.planner.render_requirement(state, extra_note=note or None)
+            requirement = self.planner.render_requirement(
+                state,
+                extra_note=note or None,
+                shared_context=self._build_parent_context(state.parent_topic_id),
+            )
             self.workspace.write_document(topic_id, "requirement.md", requirement)
             self.workspace.append_note(topic_id, "Requirement Refresh", note or "Requirement snapshot regenerated.")
             request = self.planner.requirement_feedback_request(topic_id)
@@ -170,8 +195,13 @@ class HarnessService:
     def refresh_plan(self, topic_id: str) -> Dict[str, Any]:
         with self._lock:
             state = self._require_topic(topic_id)
+            self._ensure_not_archived(state)
             documents = self.workspace.load_documents(topic_id)
-            plan = self.planner.render_plan(state, documents["requirement.md"])
+            plan = self.planner.render_plan(
+                state,
+                documents["requirement.md"],
+                shared_context=self._build_parent_context(state.parent_topic_id),
+            )
             state.plan_approved_at = None
             state.updated_at = utc_now()
             state.decision_state = DecisionState.NEEDS_FEEDBACK
@@ -198,6 +228,7 @@ class HarnessService:
     ) -> Dict[str, Any]:
         with self._lock:
             state = self._require_topic(topic_id)
+            self._ensure_not_archived(state)
             request = FeedbackRequest(
                 request_id=f"fr-{uuid.uuid4().hex[:12]}",
                 topic_id=topic_id,
@@ -229,6 +260,7 @@ class HarnessService:
     ) -> Dict[str, Any]:
         with self._lock:
             state = self._require_topic(topic_id)
+            self._ensure_not_archived(state)
             request = self.store.get_feedback_request(request_id)
             if request is None or request.topic_id != topic_id:
                 raise NotFoundError(f"Feedback request {request_id} was not found.")
@@ -278,6 +310,7 @@ class HarnessService:
     def approve_requirement(self, topic_id: str, actor: str = "human") -> Dict[str, Any]:
         with self._lock:
             state = self._require_topic(topic_id)
+            self._ensure_not_archived(state)
             state.requirement_state = RequirementState.APPROVED
             state.requirement_approved_at = utc_now()
             state.updated_at = utc_now()
@@ -297,6 +330,7 @@ class HarnessService:
     def approve_plan(self, topic_id: str, actor: str = "human") -> Dict[str, Any]:
         with self._lock:
             state = self._require_topic(topic_id)
+            self._ensure_not_archived(state)
             if not state.requirement_approved_at:
                 raise ValidationError("Requirement must be approved before plan approval.")
             state.plan_approved_at = utc_now()
@@ -313,8 +347,13 @@ class HarnessService:
     def mark_human_testing(self, topic_id: str) -> Dict[str, Any]:
         with self._lock:
             state = self._require_topic(topic_id)
+            self._ensure_not_archived(state)
+            if state.execution_state != ExecutionState.IMPLEMENTED:
+                raise ValidationError("Human testing can start only after implementation succeeds.")
             state.execution_state = ExecutionState.HUMAN_TESTING
+            state.decision_state = DecisionState.NEEDS_FEEDBACK
             state.updated_at = utc_now()
+            self.workspace.append_note(topic_id, "Human Testing", f"Human testing started at {state.updated_at}.")
             self.workspace.save_state(state)
             self.store.upsert_topic(state)
             self._publish_topic_updated(state)
@@ -323,12 +362,33 @@ class HarnessService:
     def mark_passed(self, topic_id: str) -> Dict[str, Any]:
         with self._lock:
             state = self._require_topic(topic_id)
+            self._ensure_not_archived(state)
+            if state.execution_state != ExecutionState.HUMAN_TESTING:
+                raise ValidationError("Pass can be marked only after a human testing review.")
             state.execution_state = ExecutionState.PASSED
             state.decision_state = DecisionState.NONE
             state.updated_at = utc_now()
+            self.workspace.append_note(topic_id, "Passed", f"Human confirmed testing passed at {state.updated_at}.")
             self.workspace.save_state(state)
             self.store.upsert_topic(state)
             self._publish_topic_updated(state)
+            return self.get_topic_detail(topic_id)
+
+    def archive_topic(self, topic_id: str) -> Dict[str, Any]:
+        with self._lock:
+            state = self._require_topic(topic_id)
+            if state.execution_state != ExecutionState.PASSED:
+                raise ValidationError("Only passed topics can be archived.")
+            if state.decision_state == DecisionState.ARCHIVED:
+                return self.get_topic_detail(topic_id)
+            state.decision_state = DecisionState.ARCHIVED
+            state.updated_at = utc_now()
+            self.workspace.append_note(topic_id, "Archived", f"Topic archived at {state.updated_at}.")
+            self.workspace.save_state(state)
+            self.store.upsert_topic(state)
+            self._publish_topic_updated(state)
+            archived_event = self._record_event("topic.archived", topic_id=topic_id, payload={"topic": state.to_json_dict()})
+            self.event_bus.publish(archived_event)
             return self.get_topic_detail(topic_id)
 
     def trigger_run(
@@ -339,6 +399,7 @@ class HarnessService:
     ) -> Dict[str, Any]:
         with self._lock:
             state = self._require_topic(topic_id)
+            self._ensure_not_archived(state)
             if not state.requirement_approved_at or not state.plan_approved_at:
                 raise ValidationError("Both requirement and plan approvals are required before execution.")
             executor = self.executors.get(executor_name)
@@ -433,9 +494,15 @@ class HarnessService:
                 run.artifacts = persisted_artifacts
                 run.error = result.error
                 state.execution_state = ExecutionState.IMPLEMENTED if result.exit_code == 0 else ExecutionState.FAILED
-                state.decision_state = DecisionState.NONE if result.exit_code == 0 else DecisionState.BLOCKED
+                state.decision_state = DecisionState.NEEDS_FEEDBACK if result.exit_code == 0 else DecisionState.BLOCKED
                 state.latest_run_id = run.run_id
                 state.updated_at = run.updated_at
+                if result.exit_code == 0:
+                    self.workspace.append_note(
+                        topic_id,
+                        "Implementation Complete",
+                        "Implementation finished. Human testing and pass confirmation are required before archiving.",
+                    )
                 self.workspace.save_run(run)
                 self.workspace.save_state(state)
                 self.store.upsert_run(run)
@@ -486,3 +553,45 @@ class HarnessService:
         if state is None:
             raise NotFoundError(f"Topic {topic_id} was not found.")
         return state
+
+    def _ensure_not_archived(self, state: TopicState) -> None:
+        if state.decision_state == DecisionState.ARCHIVED:
+            raise ValidationError("Archived topics are read-only.")
+
+    def _merge_tags(self, parent_tags: List[str], new_tags: List[str]) -> List[str]:
+        merged: List[str] = []
+        for tag in parent_tags + new_tags:
+            if tag and tag not in merged:
+                merged.append(tag)
+        return merged
+
+    def _build_parent_context(self, parent_topic_id: Optional[str]) -> Optional[str]:
+        if not parent_topic_id:
+            return None
+        parent_state = self.store.get_topic(parent_topic_id)
+        if parent_state is None:
+            return None
+        parent_documents = self.workspace.load_documents(parent_topic_id)
+        requirement_excerpt = self._excerpt(parent_documents.get("requirement.md", ""))
+        plan_excerpt = self._excerpt(parent_documents.get("plan.md", ""))
+        return "\n".join(
+            [
+                f"- Parent Topic ID: `{parent_state.topic_id}`",
+                f"- Parent Title: {parent_state.title}",
+                f"- Parent Summary: {parent_state.summary}",
+                "",
+                "### Parent Requirement Excerpt",
+                "",
+                requirement_excerpt or "No requirement snapshot available.",
+                "",
+                "### Parent Plan Excerpt",
+                "",
+                plan_excerpt or "No implementation plan available.",
+            ]
+        ).strip()
+
+    def _excerpt(self, content: str, limit: int = 900) -> str:
+        normalized = content.strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[:limit].rstrip() + "\n..."

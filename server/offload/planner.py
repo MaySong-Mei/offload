@@ -8,9 +8,10 @@ from .models import FeedbackRequest, FeedbackRequestType, TopicState
 
 
 class TopicPlanner:
-    def initial_documents(self, state: TopicState) -> Dict[str, str]:
-        requirement = self.render_requirement(state)
-        plan = self.render_plan(state, requirement)
+    def initial_documents(self, state: TopicState, shared_context: Optional[str] = None) -> Dict[str, str]:
+        requirement = self.render_requirement(state, shared_context=shared_context)
+        plan = self.render_plan(state, requirement, shared_context=shared_context)
+        parent_line = f"- Parent Topic: `{state.parent_topic_id}`" if state.parent_topic_id else "- Parent Topic: none"
         notes = textwrap.dedent(
             f"""
             # Notes
@@ -20,11 +21,21 @@ class TopicPlanner:
             {state.raw_input.strip()}
             """
         ).strip()
+        if shared_context:
+            notes += textwrap.dedent(
+                f"""
+
+                ## Shared Context
+
+                {shared_context}
+                """
+            ).rstrip()
         topic = textwrap.dedent(
             f"""
             # {state.title}
 
             - Topic ID: `{state.topic_id}`
+            {parent_line}
             - Requirement State: `{state.requirement_state.value}`
             - Execution State: `{state.execution_state.value}`
             - Decision State: `{state.decision_state.value}`
@@ -40,8 +51,23 @@ class TopicPlanner:
             "notes.md": notes,
         }
 
-    def render_requirement(self, state: TopicState, extra_note: Optional[str] = None) -> str:
+    def render_requirement(
+        self,
+        state: TopicState,
+        extra_note: Optional[str] = None,
+        shared_context: Optional[str] = None,
+    ) -> str:
         note_line = extra_note.strip() if extra_note else "Pending clarification from the human controller."
+        shared_context_block = ""
+        if shared_context:
+            shared_context_block = textwrap.dedent(
+                f"""
+
+                ## Shared Parent Context
+
+                {shared_context}
+                """
+            ).rstrip()
         return textwrap.dedent(
             f"""
             # Requirement Snapshot
@@ -79,11 +105,23 @@ class TopicPlanner:
             ## Latest Clarification
 
             {note_line}
+
+            {shared_context_block}
             """
         ).strip()
 
-    def render_plan(self, state: TopicState, requirement_markdown: str) -> str:
+    def render_plan(self, state: TopicState, requirement_markdown: str, shared_context: Optional[str] = None) -> str:
         requirement_summary = state.summary.strip()
+        shared_context_block = ""
+        if shared_context:
+            shared_context_block = textwrap.dedent(
+                f"""
+
+                ## Shared Parent Context
+
+                {shared_context}
+                """
+            ).rstrip()
         return textwrap.dedent(
             f"""
             # Implementation Plan
@@ -114,6 +152,8 @@ class TopicPlanner:
             ## Working Summary
 
             {requirement_summary}
+
+            {shared_context_block}
             """
         ).strip()
 
@@ -138,4 +178,3 @@ class TopicPlanner:
             options=["Approve plan", "Needs changes"],
             metadata={"approval_stage": "plan"},
         )
-

@@ -93,10 +93,22 @@ def make_handler():
                         tags=payload.get("tags", []),
                         priority=payload.get("priority", "normal"),
                         project=payload.get("project"),
+                        parent_topic_id=payload.get("parent_topic_id"),
                     )
                     self._write_json(HTTPStatus.CREATED, detail)
                     return
                 topic_id = self._extract_topic_id(parsed.path)
+                if topic_id and parsed.path == f"/topics/{topic_id}/subtopics":
+                    detail = self.server.service.create_topic(
+                        title=payload.get("title", ""),
+                        raw_input=payload.get("raw_input", ""),
+                        tags=payload.get("tags", []),
+                        priority=payload.get("priority", "normal"),
+                        project=payload.get("project"),
+                        parent_topic_id=topic_id,
+                    )
+                    self._write_json(HTTPStatus.CREATED, detail)
+                    return
                 if topic_id and parsed.path == f"/topics/{topic_id}/refresh-requirement":
                     self._write_json(HTTPStatus.OK, self.server.service.refresh_requirement(topic_id, note=payload.get("note", "")))
                     return
@@ -144,6 +156,9 @@ def make_handler():
                     return
                 if topic_id and parsed.path == f"/topics/{topic_id}/mark-passed":
                     self._write_json(HTTPStatus.OK, self.server.service.mark_passed(topic_id))
+                    return
+                if topic_id and parsed.path == f"/topics/{topic_id}/archive":
+                    self._write_json(HTTPStatus.OK, self.server.service.archive_topic(topic_id))
                     return
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             except NotFoundError as error:
@@ -292,4 +307,3 @@ def _encode_frame(text: str, opcode: int = 0x1) -> bytes:
         header.append(127)
         header.extend(length.to_bytes(8, "big"))
     return bytes(header) + payload
-

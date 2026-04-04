@@ -61,11 +61,34 @@ class HarnessHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(listing["topics"][0]["topic_id"], topic_id)
 
+    def test_subtopic_creation_via_http(self) -> None:
+        _, parent = self.request(
+            "POST",
+            "/topics",
+            {"title": "Parent", "raw_input": "Parent topic over HTTP.", "tags": ["root"]},
+        )
+        parent_id = parent["topic"]["topic_id"]
+        status, child = self.request(
+            "POST",
+            f"/topics/{parent_id}/subtopics",
+            {"title": "Child", "raw_input": "Child topic over HTTP.", "tags": ["child"]},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(child["topic"]["parent_topic_id"], parent_id)
+        self.assertEqual(child["parent_topic"]["topic_id"], parent_id)
+
     def test_run_endpoint_requires_approvals(self) -> None:
         _, detail = self.request("POST", "/topics", {"title": "Gate", "raw_input": "Needs approval."})
         topic_id = detail["topic"]["topic_id"]
         with self.assertRaises(urllib.error.HTTPError) as context:
             self.request("POST", f"/topics/{topic_id}/runs", {"executor": "command", "command": ["/usr/bin/true"]})
+        self.assertEqual(context.exception.code, 422)
+
+    def test_archive_endpoint_requires_passed_state(self) -> None:
+        _, detail = self.request("POST", "/topics", {"title": "Archive Gate", "raw_input": "Archive only after pass."})
+        topic_id = detail["topic"]["topic_id"]
+        with self.assertRaises(urllib.error.HTTPError) as context:
+            self.request("POST", f"/topics/{topic_id}/archive", {})
         self.assertEqual(context.exception.code, 422)
 
 

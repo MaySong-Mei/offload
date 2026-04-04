@@ -32,6 +32,7 @@ struct TopicSummary: Codable, Identifiable, Hashable {
     let title: String
     let summary: String
     let rawInput: String
+    let parentTopicId: String?
     let tags: [String]
     let priority: String
     let project: String?
@@ -85,6 +86,8 @@ struct RunRecordModel: Codable, Identifiable, Hashable {
 
 struct TopicDetailResponse: Codable {
     let topic: TopicSummary
+    let parentTopic: TopicSummary?
+    let childTopics: [TopicSummary]
     let documents: [String: String]
     let feedbackRequests: [FeedbackRequestModel]
     let runs: [RunRecordModel]
@@ -110,6 +113,7 @@ struct TopicCreateRequest: Codable {
     let title: String
     let rawInput: String
     let tags: [String]
+    let parentTopicId: String?
 }
 
 struct FeedbackResponseRequest: Codable {
@@ -131,4 +135,3 @@ struct RunCreateRequest: Codable {
     let executor: String
     let command: [String]
 }
-

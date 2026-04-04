@@ -74,14 +74,19 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func createTopic(title: String, rawInput: String, tagsText: String) async {
+    func createTopic(title: String, rawInput: String, tagsText: String, parentTopicID: String? = nil) async {
         guard let client = makeClient() else { return }
         do {
             let tags = tagsText
                 .split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
-            let detail = try await client.createTopic(title: title, rawInput: rawInput, tags: tags)
+            let detail: TopicDetailResponse
+            if let parentTopicID {
+                detail = try await client.createSubtopic(parentTopicID: parentTopicID, title: title, rawInput: rawInput, tags: tags)
+            } else {
+                detail = try await client.createTopic(title: title, rawInput: rawInput, tags: tags)
+            }
             selectedTopicID = detail.topic.topicId
             selectedTopicDetail = detail
             await reload()
@@ -179,6 +184,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func archiveTopic() async {
+        guard let topicID = selectedTopicID, let client = makeClient() else { return }
+        do {
+            selectedTopicDetail = try await client.archiveTopic(topicID: topicID)
+            await reload()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     private func refreshTopic(topicID: String) async {
         guard let client = makeClient() else { return }
         do {
@@ -249,4 +264,3 @@ final class AppModel: ObservableObject {
         }
     }
 }
-

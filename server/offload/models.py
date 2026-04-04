@@ -70,6 +70,7 @@ class TopicState:
     title: str
     summary: str
     raw_input: str
+    parent_topic_id: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     priority: str = "normal"
     project: Optional[str] = None
@@ -91,6 +92,7 @@ class TopicState:
             "title": self.title,
             "summary": self.summary,
             "raw_input": self.raw_input,
+            "parent_topic_id": self.parent_topic_id,
             "tags": self.tags,
             "priority": self.priority,
             "project": self.project,
@@ -114,6 +116,7 @@ class TopicState:
             title=payload["title"],
             summary=payload.get("summary", ""),
             raw_input=payload.get("raw_input", ""),
+            parent_topic_id=payload.get("parent_topic_id"),
             tags=list(payload.get("tags", [])),
             priority=payload.get("priority", "normal"),
             project=payload.get("project"),
@@ -292,4 +295,3 @@ class EventRecord:
             payload=dict(payload.get("payload", {})),
             sequence=payload.get("sequence"),
         )
-

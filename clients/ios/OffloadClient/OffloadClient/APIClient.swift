@@ -36,11 +36,20 @@ struct APIClient {
         try await send("/feedback-queue", response: FeedbackQueueResponse.self).feedbackRequests
     }
 
-    func createTopic(title: String, rawInput: String, tags: [String]) async throws -> TopicDetailResponse {
+    func createTopic(title: String, rawInput: String, tags: [String], parentTopicID: String? = nil) async throws -> TopicDetailResponse {
         try await send(
             "/topics",
             method: "POST",
-            body: TopicCreateRequest(title: title, rawInput: rawInput, tags: tags),
+            body: TopicCreateRequest(title: title, rawInput: rawInput, tags: tags, parentTopicId: parentTopicID),
+            response: TopicDetailResponse.self
+        )
+    }
+
+    func createSubtopic(parentTopicID: String, title: String, rawInput: String, tags: [String]) async throws -> TopicDetailResponse {
+        try await send(
+            "/topics/\(parentTopicID)/subtopics",
+            method: "POST",
+            body: TopicCreateRequest(title: title, rawInput: rawInput, tags: tags, parentTopicId: parentTopicID),
             response: TopicDetailResponse.self
         )
     }
@@ -122,6 +131,15 @@ struct APIClient {
         )
     }
 
+    func archiveTopic(topicID: String) async throws -> TopicDetailResponse {
+        try await send(
+            "/topics/\(topicID)/archive",
+            method: "POST",
+            body: EmptyBody(),
+            response: TopicDetailResponse.self
+        )
+    }
+
     func eventRequest() throws -> URLRequest {
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
         components?.scheme = websocketScheme(for: baseURL.scheme ?? "http")
@@ -192,4 +210,3 @@ private struct ServerErrorEnvelope: Codable {
 }
 
 private struct EmptyBody: Codable {}
-

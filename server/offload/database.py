@@ -27,6 +27,7 @@ class IndexStore:
                 title TEXT NOT NULL,
                 summary TEXT NOT NULL,
                 raw_input TEXT NOT NULL,
+                parent_topic_id TEXT,
                 tags_json TEXT NOT NULL,
                 priority TEXT NOT NULL,
                 project_name TEXT,
@@ -93,11 +94,21 @@ class IndexStore:
             );
 
             CREATE INDEX IF NOT EXISTS idx_topics_updated ON topics(updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_topics_parent ON topics(parent_topic_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_feedback_requests_topic ON feedback_requests(topic_id, status);
             CREATE INDEX IF NOT EXISTS idx_runs_topic ON runs(topic_id, created_at DESC);
             """
         )
+        self._ensure_column("topics", "parent_topic_id", "TEXT")
         self.connection.commit()
+
+    def _ensure_column(self, table_name: str, column_name: str, definition: str) -> None:
+        columns = {
+            row["name"]
+            for row in self.connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name not in columns:
+            self.connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
     def close(self) -> None:
         self.connection.close()
@@ -106,15 +117,16 @@ class IndexStore:
         self.connection.execute(
             """
             INSERT INTO topics (
-                topic_id, title, summary, raw_input, tags_json, priority, project_name,
+                topic_id, title, summary, raw_input, parent_topic_id, tags_json, priority, project_name,
                 created_at, updated_at, requirement_state, execution_state, decision_state,
                 requirement_approved_at, plan_approved_at, latest_run_id,
                 pending_feedback_request_id, assigned_executor, workspace_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(topic_id) DO UPDATE SET
                 title=excluded.title,
                 summary=excluded.summary,
                 raw_input=excluded.raw_input,
+                parent_topic_id=excluded.parent_topic_id,
                 tags_json=excluded.tags_json,
                 priority=excluded.priority,
                 project_name=excluded.project_name,
@@ -135,6 +147,7 @@ class IndexStore:
                 state.title,
                 state.summary,
                 state.raw_input,
+                state.parent_topic_id,
                 json.dumps(state.tags),
                 state.priority,
                 state.project,
@@ -163,6 +176,7 @@ class IndexStore:
                 "title": row["title"],
                 "summary": row["summary"],
                 "raw_input": row["raw_input"],
+                "parent_topic_id": row["parent_topic_id"],
                 "tags": json.loads(row["tags_json"]),
                 "priority": row["priority"],
                 "project": row["project_name"],
@@ -182,6 +196,13 @@ class IndexStore:
 
     def list_topics(self) -> List[TopicState]:
         rows = self.connection.execute("SELECT * FROM topics ORDER BY updated_at DESC").fetchall()
+        return [self.get_topic(row["topic_id"]) for row in rows if row is not None]
+
+    def list_child_topics(self, parent_topic_id: str) -> List[TopicState]:
+        rows = self.connection.execute(
+            "SELECT topic_id FROM topics WHERE parent_topic_id = ? ORDER BY updated_at DESC",
+            (parent_topic_id,),
+        ).fetchall()
         return [self.get_topic(row["topic_id"]) for row in rows if row is not None]
 
     def upsert_feedback_request(self, request: FeedbackRequest) -> None:
@@ -374,4 +395,3 @@ class IndexStore:
             )
             for row in rows
         ]
-
