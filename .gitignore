@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+*.pyc
+*.pyo
+*.swp
+.DS_Store
+.venv/
+.offload/
+workspace/
+DerivedData/
+
