@@ -19,8 +19,13 @@ def main() -> None:
     args = parser.parse_args()
 
     workspace = Path(args.workspace).resolve()
-    service = HarnessService(workspace)
     projects_root = Path(args.projects_root).resolve() if args.projects_root else None
+
+    # Discover project paths before creating the service (needed for reindex)
+    temp_scanner = ProjectScanner(projects_root)
+    project_paths = [p.path for p in temp_scanner.list_projects()]
+
+    service = HarnessService(workspace, project_paths=project_paths)
     init_runner = InitRunner(event_bus=service.event_bus)
     scanner = ProjectScanner(projects_root, init_runner=init_runner)
     server = create_http_server(args.host, args.port, service, scanner=scanner, init_runner=init_runner, auth_token=os.environ.get("OFFLOAD_API_TOKEN"))

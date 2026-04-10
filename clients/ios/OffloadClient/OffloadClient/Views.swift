@@ -1091,6 +1091,12 @@ private struct NewTopicSheet: View {
             }
         }
         .presentationDetents([.large])
+        .onAppear {
+            // Auto-fill project from the currently selected project in sidebar
+            if project.isEmpty, let key = model.selectedProjectKey, !key.isEmpty {
+                project = key
+            }
+        }
     }
 }
 
