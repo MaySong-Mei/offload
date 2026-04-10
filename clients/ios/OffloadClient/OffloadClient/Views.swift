@@ -1,74 +1,42 @@
 import SwiftUI
 
+// MARK: - Root (3-column NavigationSplitView)
+
 struct RootView: View {
     @StateObject private var model = AppModel()
     @State private var showingNewTopicSheet = false
+    @State private var showingSettings = false
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
-        NavigationSplitView {
-            VStack(spacing: 16) {
-                ConnectionPanel(model: model)
-                HStack {
-                    Text("Feedback queue")
-                        .font(.headline)
-                    Spacer()
-                    Text("\(model.feedbackQueue.count)")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                List(model.topics, selection: Binding(
-                    get: { model.selectedTopicID },
-                    set: { model.selectTopic($0) }
-                )) { topic in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(topic.title)
-                            .font(.headline)
-                        Text(topic.summary)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                        HStack {
-                            StatusChip(text: topic.requirementState.rawValue)
-                            StatusChip(text: topic.executionState.rawValue)
-                            StatusChip(text: topic.decisionState.rawValue)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                    .tag(topic.topicId)
-                }
-                .overlay {
-                    if model.topics.isEmpty {
-                        ContentUnavailableView("No Topics", systemImage: "tray", description: Text("Capture a new idea to start the loop."))
-                    }
-                }
-
-                if let errorMessage = model.errorMessage {
-                    Text(errorMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
-            }
-            .padding()
-            .navigationTitle("Offload")
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showingNewTopicSheet = true
-                    } label: {
-                        Label("New Topic", systemImage: "plus")
-                    }
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            ProjectsView(model: model, showingSettings: $showingSettings)
+        } content: {
+            if model.selectedProjectKey != nil {
+                ProjectDashboardView(model: model, showingNewTopicSheet: $showingNewTopicSheet)
+            } else {
+                ContentUnavailableView {
+                    Label("Choose a Project", systemImage: "folder")
+                } description: {
+                    Text("Select a project from the sidebar to see its topics.")
                 }
             }
         } detail: {
             if let detail = model.selectedTopicDetail {
                 TopicDetailView(model: model, detail: detail)
             } else {
-                ContentUnavailableView("Select A Topic", systemImage: "square.and.pencil", description: Text("Choose a topic from the list or create a new one."))
+                ContentUnavailableView {
+                    Label("No Topic Selected", systemImage: "doc.text.magnifyingglass")
+                } description: {
+                    Text("Choose a topic from the list or create a new one.")
+                }
             }
         }
         .sheet(isPresented: $showingNewTopicSheet) {
             NewTopicSheet(model: model, parentTopic: nil)
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsSheet(model: model)
         }
         .task {
             model.bootstrap()
@@ -76,43 +44,944 @@ struct RootView: View {
     }
 }
 
-private struct ConnectionPanel: View {
+// MARK: - Projects (column 1)
+
+private struct ProjectsView: View {
     @ObservedObject var model: AppModel
+    @Binding var showingSettings: Bool
+
+    var body: some View {
+        List(selection: Binding(
+            get: { model.selectedProjectKey },
+            set: { model.selectedProjectKey = $0 }
+        )) {
+            Section {
+                ForEach(model.projects) { project in
+                    ProjectCard(model: model, project: project)
+                        .tag(project.path)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                }
+            } header: {
+                Text("Projects")
+            }
+
+            if !model.topics.filter({ ($0.project ?? "").isEmpty }).isEmpty {
+                Section {
+                    Label("Ungrouped", systemImage: "tray")
+                        .font(.subheadline.weight(.medium))
+                        .tag("")
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Offload")
+        .overlay {
+            if model.projects.isEmpty && !model.isLoading {
+                ContentUnavailableView {
+                    Label("No Projects", systemImage: "folder.badge.questionmark")
+                } description: {
+                    Text("Configure the server to scan a directory containing git repositories.")
+                }
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    showingSettings = true
+                } label: {
+                    Image(systemName: connectionIcon)
+                        .foregroundStyle(model.isOnline ? .green : .secondary)
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    Task { await model.reload() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .disabled(model.isLoading)
+            }
+        }
+        .refreshable {
+            await model.reload()
+        }
+        .overlay(alignment: .bottom) {
+            if let errorMessage = model.errorMessage {
+                ErrorBanner(message: errorMessage) {
+                    model.errorMessage = nil
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: model.errorMessage)
+    }
+
+    private var connectionIcon: String {
+        model.isOnline ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash"
+    }
+}
+
+// MARK: - Project Card
+
+private struct ProjectCard: View {
+    @ObservedObject var model: AppModel
+    let project: ProjectInfo
+    @State private var showingUninstallConfirm = false
+    @State private var showingReinitConfirm = false
+    @State private var showingFullLog = false
+
+    private var topicCount: Int {
+        model.topics.filter { $0.project == project.path }.count
+    }
+
+    private var initializingContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Initializing…")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    Task { await model.cancelInit(project) }
+                } label: {
+                    Text("Cancel")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.red)
+                }
+                .buttonStyle(.plain)
+            }
+            InitLogPreview(log: model.projectInitLogs[project.path] ?? [], onTap: { showingFullLog = true })
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Connection")
-                .font(.headline)
-            TextField("Server URL", text: $model.serverURLString)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .textFieldStyle(.roundedBorder)
-            SecureField("API token (optional)", text: $model.apiToken)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .textFieldStyle(.roundedBorder)
-            HStack {
-                Button("Connect") {
-                    model.connect()
-                }
-                .buttonStyle(.borderedProminent)
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "folder.fill")
+                    .font(.title3)
+                    .foregroundStyle(project.isInitialized ? Color.accentColor : Color.secondary)
+                    .frame(width: 28)
 
-                Button("Reload") {
-                    Task { await model.reload() }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(project.name)
+                        .font(.headline)
+                        .lineLimit(1)
+                    Text(project.path)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 0)
+
+                if project.isInitialized || project.initStatus == "failed" {
+                    Menu {
+                        if project.initStatus == "ready" {
+                            Button {
+                                showingReinitConfirm = true
+                            } label: {
+                                Label("Re-initialize", systemImage: "arrow.clockwise")
+                            }
+                        }
+                        if project.initStatus == "failed" {
+                            Button {
+                                Task { await model.initializeProject(project) }
+                            } label: {
+                                Label("Retry Initialize", systemImage: "arrow.clockwise")
+                            }
+                        }
+                        Divider()
+                        Button(role: .destructive) {
+                            showingUninstallConfirm = true
+                        } label: {
+                            Label("Uninstall Offload", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            switch project.initStatus {
+            case "ready":
+                if let summary = project.summary, !summary.isEmpty {
+                    Text(summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 8) {
+                    Label("\(topicCount)", systemImage: "doc.text")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Ready")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(.green.opacity(0.12), in: Capsule())
+                }
+
+            case "initializing":
+                initializingContent
+
+            case "failed":
+                Text(project.initError ?? "Initialization failed.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                Button("Retry") {
+                    Task { await model.initializeProject(project) }
                 }
                 .buttonStyle(.bordered)
+                .controlSize(.small)
 
-                Spacer()
-
-                Text(model.statusMessage)
-                    .font(.footnote)
+            default:  // not_initialized
+                Text("Not yet onboarded to Offload.")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
+                Button {
+                    Task { await model.initializeProject(project) }
+                } label: {
+                    Label("Initialize", systemImage: "sparkles")
+                        .font(.caption.weight(.medium))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
         }
-        .padding()
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .padding(12)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        .sheet(isPresented: $showingFullLog) {
+            InitLogSheet(model: model, project: project)
+        }
+        .confirmationDialog(
+            "Uninstall Offload from \(project.name)?",
+            isPresented: $showingUninstallConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Uninstall", role: .destructive) {
+                Task { await model.uninitializeProject(project) }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This removes the .offload/ directory from the repo and strips the .gitignore entry. Your source files are untouched. You can re-initialize later.")
+        }
+        .confirmationDialog(
+            "Re-initialize \(project.name)?",
+            isPresented: $showingReinitConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Re-initialize") {
+                Task { await model.initializeProject(project) }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Claude will re-read the repo and overwrite .offload/context/*.md. Existing topics are preserved.")
+        }
     }
 }
+
+// MARK: - Project Dashboard (column 2)
+
+private struct ProjectDashboardView: View {
+    @ObservedObject var model: AppModel
+    @Binding var showingNewTopicSheet: Bool
+    @State private var readmeContent: String?
+
+    private var topics: [TopicSummary] {
+        model.topicsForSelectedProject()
+    }
+
+    private var projectName: String {
+        if let key = model.selectedProjectKey {
+            if key.isEmpty { return "Ungrouped" }
+            if let p = model.projects.first(where: { $0.path == key }) { return p.name }
+            return (key as NSString).lastPathComponent
+        }
+        return "Dashboard"
+    }
+
+    private var selectedProject: ProjectInfo? {
+        guard let key = model.selectedProjectKey else { return nil }
+        return model.projects.first { $0.path == key }
+    }
+
+    // --- Outer loop: items needing human action ---
+
+    private var needsRequirementApproval: [TopicSummary] {
+        topics.filter { $0.requirementState == .specified && $0.requirementApprovedAt == nil }
+    }
+
+    private var needsPlanApproval: [TopicSummary] {
+        topics.filter { $0.requirementApprovedAt != nil && $0.planApprovedAt == nil && $0.executionState == .idle }
+    }
+
+    private var needsHumanTesting: [TopicSummary] {
+        topics.filter { $0.executionState == .humanTesting }
+    }
+
+    private var failedTopics: [TopicSummary] {
+        topics.filter { $0.executionState == .failed }
+    }
+
+    private var pendingFeedback: [FeedbackRequestModel] {
+        let topicIds = Set(topics.map(\.topicId))
+        return model.feedbackQueue.filter { topicIds.contains($0.topicId) }
+    }
+
+    private var actionRequiredCount: Int {
+        needsRequirementApproval.count + needsPlanApproval.count + needsHumanTesting.count + failedTopics.count + pendingFeedback.count
+    }
+
+    // --- Inner loop: agent activity ---
+
+    private var implementingTopics: [TopicSummary] {
+        topics.filter { $0.executionState == .implementing || $0.executionState == .queued }
+    }
+
+    private var recentlyCompleted: [TopicSummary] {
+        topics.filter { $0.executionState == .implemented || $0.executionState == .passed }
+    }
+
+    // --- Pipeline ---
+
+    private var pipelineCounts: [(label: String, state: String, count: Int, color: Color)] {
+        let states: [(String, String, Color)] = [
+            ("Captured", "captured", .secondary),
+            ("Specified", "specified", .blue),
+            ("Approved", "approved", .teal),
+            ("Building", "implementing", .indigo),
+            ("Testing", "human_testing", .orange),
+            ("Passed", "passed", .green),
+            ("Archived", "archived", .secondary),
+        ]
+        return states.map { label, state, color in
+            let count: Int
+            switch state {
+            case "captured": count = topics.filter { $0.requirementState == .captured }.count
+            case "specified": count = topics.filter { $0.requirementState == .specified || $0.requirementState == .clarifying || $0.requirementState == .discussed }.count
+            case "approved": count = topics.filter { $0.requirementApprovedAt != nil && $0.planApprovedAt == nil }.count
+            case "implementing": count = topics.filter { $0.executionState == .implementing || $0.executionState == .queued }.count
+            case "human_testing": count = topics.filter { $0.executionState == .humanTesting }.count
+            case "passed": count = topics.filter { $0.executionState == .passed && $0.decisionState != .archived }.count
+            case "archived": count = topics.filter { $0.decisionState == .archived }.count
+            default: count = 0
+            }
+            return (label, state, count, color)
+        }
+    }
+
+    var body: some View {
+        List(selection: Binding(
+            get: { model.selectedTopicID },
+            set: { model.selectTopic($0) }
+        )) {
+            // Section 1: Action Required
+            if actionRequiredCount > 0 {
+                Section {
+                    actionRequiredSection
+                } header: {
+                    Label("Action Required (\(actionRequiredCount))", systemImage: "exclamationmark.circle.fill")
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            // Section 2: Agent Activity
+            if !implementingTopics.isEmpty || !recentlyCompleted.isEmpty {
+                Section {
+                    agentActivitySection
+                } header: {
+                    Label("Agent Activity", systemImage: "cpu")
+                }
+            }
+
+            // Section 3: Topics Pipeline
+            Section {
+                pipelineSection
+            } header: {
+                Label("Pipeline", systemImage: "chart.bar")
+            }
+
+            // Section 4: All Topics
+            Section {
+                ForEach(topics) { topic in
+                    TopicRow(topic: topic)
+                        .tag(topic.topicId)
+                }
+            } header: {
+                Label("All Topics (\(topics.count))", systemImage: "list.bullet")
+            }
+
+            // Section 5: Project Context
+            Section {
+                projectContextSection
+            } header: {
+                Label("Project Context", systemImage: "book.closed")
+            }
+        }
+        .listStyle(.insetGrouped)
+        .overlay {
+            if topics.isEmpty && actionRequiredCount == 0 {
+                ContentUnavailableView {
+                    Label("No Topics", systemImage: "tray")
+                } description: {
+                    Text("Create a topic to start working on this project.")
+                } actions: {
+                    Button("New Topic") { showingNewTopicSheet = true }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                }
+            }
+        }
+        .navigationTitle(projectName)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { showingNewTopicSheet = true } label: {
+                    Image(systemName: "plus.circle.fill")
+                }
+            }
+        }
+        .task(id: model.selectedProjectKey) {
+            await loadReadme()
+        }
+    }
+
+    // MARK: Section 1 — Action Required
+
+    @ViewBuilder
+    private var actionRequiredSection: some View {
+        ForEach(pendingFeedback) { fb in
+            ActionCard(
+                icon: "bubble.left.fill",
+                color: .orange,
+                title: fb.title,
+                subtitle: "Feedback requested for topic"
+            ) {
+                model.selectTopic(fb.topicId)
+            }
+        }
+        ForEach(needsRequirementApproval) { topic in
+            ActionCard(
+                icon: "checkmark.circle",
+                color: .blue,
+                title: topic.title,
+                subtitle: "Requirement ready for approval"
+            ) {
+                model.selectTopic(topic.topicId)
+            } action: {
+                Task { await model.selectAndApproveRequirement(topic.topicId) }
+            } actionLabel: {
+                Label("Approve", systemImage: "checkmark")
+            }
+        }
+        ForEach(needsPlanApproval) { topic in
+            ActionCard(
+                icon: "map",
+                color: .teal,
+                title: topic.title,
+                subtitle: "Plan ready for approval"
+            ) {
+                model.selectTopic(topic.topicId)
+            } action: {
+                Task { await model.selectAndApprovePlan(topic.topicId) }
+            } actionLabel: {
+                Label("Approve", systemImage: "checkmark")
+            }
+        }
+        ForEach(needsHumanTesting) { topic in
+            ActionCard(
+                icon: "person.fill.checkmark",
+                color: .purple,
+                title: topic.title,
+                subtitle: "Ready for human testing"
+            ) {
+                model.selectTopic(topic.topicId)
+            }
+        }
+        ForEach(failedTopics) { topic in
+            ActionCard(
+                icon: "xmark.circle.fill",
+                color: .red,
+                title: topic.title,
+                subtitle: "Run failed — needs attention"
+            ) {
+                model.selectTopic(topic.topicId)
+            }
+        }
+    }
+
+    // MARK: Section 2 — Agent Activity
+
+    @ViewBuilder
+    private var agentActivitySection: some View {
+        ForEach(implementingTopics) { topic in
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(topic.title)
+                        .font(.subheadline.weight(.medium))
+                    Text("Agent is working…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .tag(topic.topicId)
+        }
+        ForEach(recentlyCompleted.prefix(3)) { topic in
+            HStack(spacing: 10) {
+                Image(systemName: topic.executionState == .passed ? "checkmark.circle.fill" : "hammer.fill")
+                    .foregroundStyle(topic.executionState == .passed ? .green : .teal)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(topic.title)
+                        .font(.subheadline.weight(.medium))
+                    Text(topic.executionState == .passed ? "Passed" : "Implemented")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .tag(topic.topicId)
+        }
+    }
+
+    // MARK: Section 3 — Pipeline
+
+    private var pipelineSection: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(pipelineCounts.filter { $0.count > 0 }, id: \.state) { item in
+                    VStack(spacing: 3) {
+                        Text("\(item.count)")
+                            .font(.title3.weight(.bold))
+                            .foregroundStyle(item.color)
+                        Text(item.label)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(minWidth: 50)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 4)
+                    .background(item.color.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    // MARK: Section 5 — Project Context
+
+    @ViewBuilder
+    private var projectContextSection: some View {
+        if let readme = readmeContent, !readme.isEmpty {
+            NavigationLink {
+                ScrollView {
+                    ReadmeView(content: readme)
+                        .padding()
+                }
+                .navigationTitle("README")
+                .navigationBarTitleDisplayMode(.inline)
+            } label: {
+                Label("README", systemImage: "doc.text.fill")
+            }
+        }
+        if let project = selectedProject {
+            if project.isInitialized {
+                NavigationLink {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            if let summary = project.summary {
+                                Text(summary)
+                                    .font(.body)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding()
+                    }
+                    .navigationTitle("Project Summary")
+                    .navigationBarTitleDisplayMode(.inline)
+                } label: {
+                    Label("Summary & Context", systemImage: "brain")
+                }
+            }
+        }
+    }
+
+    private func loadReadme() async {
+        guard let key = model.selectedProjectKey, !key.isEmpty else {
+            readmeContent = nil
+            return
+        }
+        readmeContent = await model.fetchReadme(projectPath: key)
+    }
+}
+
+// MARK: - Action Card
+
+private struct ActionCard<ActionLabel: View>: View {
+    let icon: String
+    let color: Color
+    let title: String
+    let subtitle: String
+    let onTap: () -> Void
+    var action: (() -> Void)?
+    var actionLabel: (() -> ActionLabel)?
+
+    init(
+        icon: String,
+        color: Color,
+        title: String,
+        subtitle: String,
+        onTap: @escaping () -> Void,
+        action: (() -> Void)? = nil,
+        @ViewBuilder actionLabel: @escaping () -> ActionLabel
+    ) {
+        self.icon = icon
+        self.color = color
+        self.title = title
+        self.subtitle = subtitle
+        self.onTap = onTap
+        self.action = action
+        self.actionLabel = actionLabel
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .foregroundStyle(color)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let action, let actionLabel {
+                    Button(action: action) {
+                        actionLabel()
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.mini)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// Convenience init without action button
+extension ActionCard where ActionLabel == EmptyView {
+    init(
+        icon: String,
+        color: Color,
+        title: String,
+        subtitle: String,
+        onTap: @escaping () -> Void
+    ) {
+        self.icon = icon
+        self.color = color
+        self.title = title
+        self.subtitle = subtitle
+        self.onTap = onTap
+        self.action = nil
+        self.actionLabel = nil
+    }
+}
+
+// MARK: - Settings Sheet
+
+// MARK: - Init Log Preview (inline in card)
+
+private struct InitLogPreview: View {
+    let log: [String]
+    let onTap: () -> Void
+
+    var body: some View {
+        if !log.isEmpty {
+            Button(action: onTap) {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(log.suffix(5).enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Text("Tap for full log →")
+                        .font(.caption2)
+                        .foregroundColor(.accentColor)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+}
+
+// MARK: - Init Log Sheet
+
+private struct InitLogSheet: View {
+    @ObservedObject var model: AppModel
+    let project: ProjectInfo
+    @Environment(\.dismiss) private var dismiss
+
+    private var log: [String] {
+        model.projectInitLogs[project.path] ?? []
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(log.enumerated()), id: \.offset) { idx, line in
+                            Text(line)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.primary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .id(idx)
+                        }
+                    }
+                    .padding()
+                }
+                .onChange(of: log.count) { _, newCount in
+                    if newCount > 0 {
+                        withAnimation {
+                            proxy.scrollTo(newCount - 1, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+            .background(Color(.systemGroupedBackground))
+            .navigationTitle("Init: \(project.name)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    if project.initStatus == "initializing" {
+                        Button("Cancel Init", role: .destructive) {
+                            Task { await model.cancelInit(project) }
+                        }
+                        .foregroundStyle(.red)
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+private struct SettingsSheet: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Server URL", text: $model.serverURLString)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                        .font(.footnote.monospaced())
+                    SecureField("API token (optional)", text: $model.apiToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button {
+                        model.connect()
+                    } label: {
+                        Label("Connect", systemImage: "antenna.radiowaves.left.and.right")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                } header: {
+                    Text("Server")
+                } footer: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(model.isOnline ? .green : .secondary)
+                            .frame(width: 6, height: 6)
+                        Text(model.statusMessage)
+                    }
+                }
+
+                if model.pendingOperationCount > 0 {
+                    Section("Pending Sync") {
+                        HStack {
+                            Label("Queued changes", systemImage: "arrow.triangle.2.circlepath")
+                            Spacer()
+                            Text("\(model.pendingOperationCount)")
+                                .foregroundStyle(.orange)
+                                .fontWeight(.semibold)
+                        }
+                        if model.isOnline && !model.isSyncing {
+                            Button("Sync Now") {
+                                Task { await model.syncPendingOperations() }
+                            }
+                        }
+                    }
+                }
+
+                if !model.feedbackQueue.isEmpty {
+                    Section("Feedback") {
+                        Label("Pending requests: \(model.feedbackQueue.count)", systemImage: "bell.badge.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+// MARK: - Topic Row
+
+private struct TopicRow: View {
+    let topic: TopicSummary
+
+    private var isLocal: Bool { topic.topicId.hasPrefix("local-") }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(topic.title)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                if isLocal {
+                    Text("offline")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.orange.opacity(0.12), in: Capsule())
+                }
+            }
+            if !topic.summary.isEmpty {
+                Text(topic.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            HStack(spacing: 6) {
+                StatusChip(text: topic.requirementState.rawValue, category: .requirement)
+                StatusChip(text: topic.executionState.rawValue, category: .execution)
+                if topic.decisionState != .none {
+                    StatusChip(text: topic.decisionState.rawValue, category: .decision)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+// MARK: - Connection Panel
+
+private struct ConnectionPanel: View {
+    @ObservedObject var model: AppModel
+    @Binding var isExpanded: Bool
+
+    var isConnected: Bool { model.statusMessage == "Connected" }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(spacing: 12) {
+                TextField("Server URL", text: $model.serverURLString)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.footnote.monospaced())
+
+                SecureField("API token (optional)", text: $model.apiToken)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .textFieldStyle(.roundedBorder)
+                    .font(.footnote)
+
+                Button {
+                    model.connect()
+                } label: {
+                    Text("Connect")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+        } label: {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Server")
+                        .font(.subheadline.weight(.medium))
+                    Text(model.statusMessage)
+                        .font(.caption)
+                        .foregroundStyle(isConnected ? .green : .secondary)
+                }
+            } icon: {
+                Image(systemName: isConnected ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                    .foregroundStyle(isConnected ? .green : .secondary)
+                    .symbolEffect(.pulse, isActive: model.isLoading)
+            }
+        }
+    }
+}
+
+// MARK: - Error Banner
+
+private struct ErrorBanner: View {
+    let message: String
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.white)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.white)
+                .lineLimit(2)
+            Spacer()
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.red.gradient, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal)
+        .padding(.bottom, 8)
+    }
+}
+
+// MARK: - New Topic Sheet
 
 private struct NewTopicSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -121,24 +990,84 @@ private struct NewTopicSheet: View {
     @State private var title = ""
     @State private var rawInput = ""
     @State private var tagsText = ""
+    @State private var project = ""
+
+    private var isValid: Bool {
+        !rawInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         NavigationStack {
             Form {
                 if let parentTopic {
-                    Section("Parent Topic") {
-                        Text(parentTopic.title)
-                        Text(parentTopic.summary)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+                    Section {
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(parentTopic.title)
+                                    .font(.subheadline.weight(.medium))
+                                Text(parentTopic.summary)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        } icon: {
+                            Image(systemName: "arrow.turn.down.right")
+                                .foregroundStyle(.secondary)
+                        }
+                    } header: {
+                        Text("Parent Topic")
                     }
                 }
-                TextField("Title", text: $title)
-                TextField("Tags, comma separated", text: $tagsText)
-                TextEditor(text: $rawInput)
-                    .frame(minHeight: 220)
+
+                Section {
+                    TextField("Title", text: $title)
+                    TextField("Tags (comma separated)", text: $tagsText)
+                        .textInputAutocapitalization(.never)
+
+                    if !model.projects.isEmpty {
+                        Menu {
+                            Button("None") { project = "" }
+                            Divider()
+                            ForEach(model.projects) { p in
+                                Button {
+                                    project = p.path
+                                } label: {
+                                    Label(p.name, systemImage: p.hasReadme ? "doc.text" : "folder")
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Label("Project", systemImage: "folder.fill")
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                                Text(project.isEmpty ? "None" : (URL(fileURLWithPath: project).lastPathComponent))
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                    } else {
+                        TextField("Project (repo path)", text: $project)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.footnote.monospaced())
+                    }
+                } header: {
+                    Text("Details")
+                }
+
+                Section {
+                    TextEditor(text: $rawInput)
+                        .frame(minHeight: 200)
+                } header: {
+                    Text("Description")
+                } footer: {
+                    Text("Describe the idea, task, or goal in natural language.")
+                }
             }
             .navigationTitle(parentTopic == nil ? "New Topic" : "New Subtopic")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -150,17 +1079,22 @@ private struct NewTopicSheet: View {
                                 title: title,
                                 rawInput: rawInput,
                                 tagsText: tagsText,
+                                project: project.isEmpty ? nil : project,
                                 parentTopicID: parentTopic?.topicId
                             )
                             dismiss()
                         }
                     }
-                    .disabled(rawInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .fontWeight(.semibold)
+                    .disabled(!isValid)
                 }
             }
         }
+        .presentationDetents([.large])
     }
 }
+
+// MARK: - Topic Detail
 
 private struct TopicDetailView: View {
     @ObservedObject var model: AppModel
@@ -168,6 +1102,10 @@ private struct TopicDetailView: View {
     @State private var refreshNote = ""
     @State private var commandText = "/usr/bin/printf hello-from-ios"
     @State private var showingNewSubtopicSheet = false
+    @State private var selectedExecutor = "command"
+    @State private var promptText = ""
+    @State private var readmeContent: String?
+    @State private var loadedReadmeForProject: String?
 
     private var pendingFeedback: [FeedbackRequestModel] {
         detail.feedbackRequests.filter { $0.status == "pending" }
@@ -179,176 +1117,390 @@ private struct TopicDetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(detail.topic.title)
-                            .font(.largeTitle)
-                            .fontWeight(.semibold)
-                        Text(detail.topic.summary)
-                            .foregroundStyle(.secondary)
-                        HStack {
-                            StatusChip(text: detail.topic.requirementState.rawValue)
-                            StatusChip(text: detail.topic.executionState.rawValue)
-                            StatusChip(text: detail.topic.decisionState.rawValue)
-                        }
-                        if let parentTopic = detail.parentTopic {
-                            Button {
-                                model.selectTopic(parentTopic.topicId)
-                            } label: {
-                                Label("Parent: \(parentTopic.title)", systemImage: "arrow.turn.up.left")
-                            }
-                            .buttonStyle(.borderless)
-                            .font(.subheadline)
-                        }
-                    }
-                    Spacer()
+            VStack(alignment: .leading, spacing: 24) {
+                // Header
+                headerSection
+
+                // Project README
+                if let readme = readmeContent, !readme.isEmpty {
+                    readmeSection(content: readme)
                 }
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Actions")
-                        .font(.headline)
-                    HStack {
-                        Button("New Subtopic") {
-                            showingNewSubtopicSheet = true
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Button("Approve Requirement") {
-                            Task { await model.approveRequirement() }
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Button("Approve Plan") {
-                            Task { await model.approvePlan() }
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Button("Refresh Plan") {
-                            Task { await model.refreshPlan() }
-                        }
-                        .buttonStyle(.bordered)
-                    }
-
-                    TextField("Clarification note for requirement refresh", text: $refreshNote)
-                        .textFieldStyle(.roundedBorder)
-
-                    HStack {
-                        Button("Refresh Requirement") {
-                            Task { await model.refreshRequirement(note: refreshNote) }
-                        }
-                        .buttonStyle(.bordered)
-
-                        Button("Start Human Testing") {
-                            Task { await model.markHumanTesting() }
-                        }
-                        .buttonStyle(.bordered)
-
-                        Button("Confirm Passed") {
-                            Task { await model.markPassed() }
-                        }
-                        .buttonStyle(.bordered)
-                    }
-
-                    if canArchive {
-                        Button("Archive Topic") {
-                            Task { await model.archiveTopic() }
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-
-                    Text("Archive is only available after a human testing review marks the topic as passed.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-
-                    TextField("Command to run", text: $commandText)
-                        .textFieldStyle(.roundedBorder)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-
-                    Button("Trigger Run") {
-                        Task { await model.triggerRun(commandText: commandText) }
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                .padding()
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
-
+                // Feedback (prominent when present)
                 if !pendingFeedback.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Pending Feedback")
-                            .font(.headline)
-                        ForEach(pendingFeedback) { request in
-                            FeedbackRequestCard(model: model, request: request)
-                        }
-                    }
+                    feedbackSection
                 }
 
+                // Workflow actions
+                actionsSection
+
+                // Run trigger
+                runTriggerSection
+
+                // Subtopics
                 if !detail.childTopics.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Subtopics")
-                            .font(.headline)
-                        ForEach(detail.childTopics) { child in
-                            Button {
-                                model.selectTopic(child.topicId)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(child.title)
-                                        .font(.headline)
-                                    Text(child.summary)
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding()
-                                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
+                    subtopicsSection
                 }
 
-                DocumentSection(title: "Overview", bodyText: detail.documents["topic.md"] ?? "")
-                DocumentSection(title: "Requirement", bodyText: detail.documents["requirement.md"] ?? "")
-                DocumentSection(title: "Plan", bodyText: detail.documents["plan.md"] ?? "")
-                DocumentSection(title: "Notes", bodyText: detail.documents["notes.md"] ?? "")
+                // Documents
+                documentsSection
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Runs")
-                        .font(.headline)
-                    ForEach(detail.runs) { run in
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Text(run.executor)
-                                    .font(.headline)
-                                Spacer()
-                                StatusChip(text: run.status)
-                            }
-                            Text(run.summary)
-                            if !run.command.isEmpty {
-                                Text(run.command.joined(separator: " "))
-                                    .font(.footnote.monospaced())
-                                    .foregroundStyle(.secondary)
-                            }
-                            if !run.artifacts.isEmpty {
-                                Text(run.artifacts.joined(separator: "\n"))
-                                    .font(.footnote.monospaced())
-                            }
-                        }
-                        .padding()
-                        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
-                    }
+                // Run history
+                if !detail.runs.isEmpty {
+                    runsSection
                 }
             }
-            .padding(24)
+            .padding(20)
         }
+        .background(Color(.systemGroupedBackground))
         .navigationTitle(detail.topic.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showingNewSubtopicSheet = true
+                } label: {
+                    Label("New Subtopic", systemImage: "plus.circle")
+                }
+            }
+        }
         .sheet(isPresented: $showingNewSubtopicSheet) {
             NewTopicSheet(model: model, parentTopic: detail.topic)
         }
+        .task(id: detail.topic.project) {
+            await loadReadmeIfNeeded()
+        }
+    }
+
+    private func loadReadmeIfNeeded() async {
+        guard let project = detail.topic.project, !project.isEmpty else {
+            readmeContent = nil
+            loadedReadmeForProject = nil
+            return
+        }
+        if loadedReadmeForProject == project { return }
+        loadedReadmeForProject = project
+        readmeContent = await model.fetchReadme(projectPath: project)
+    }
+
+    @ViewBuilder
+    private func readmeSection(content: String) -> some View {
+        DisclosureGroup {
+            ReadmeView(content: content)
+                .padding(.top, 8)
+        } label: {
+            Label("README", systemImage: "doc.text.fill")
+                .font(.headline)
+        }
+        .padding(18)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    // MARK: Header
+
+    private var headerSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(detail.topic.title)
+                .font(.title.weight(.bold))
+
+            if !detail.topic.summary.isEmpty {
+                Text(detail.topic.summary)
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                StatusChip(text: detail.topic.requirementState.rawValue, category: .requirement)
+                StatusChip(text: detail.topic.executionState.rawValue, category: .execution)
+                if detail.topic.decisionState != .none {
+                    StatusChip(text: detail.topic.decisionState.rawValue, category: .decision)
+                }
+            }
+
+            if let project = detail.topic.project, !project.isEmpty {
+                Label(project, systemImage: "folder.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !detail.topic.workspacePath.isEmpty {
+                Label(detail.topic.workspacePath, systemImage: "externaldrive")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+
+            if let parentTopic = detail.parentTopic {
+                Button {
+                    model.selectTopic(parentTopic.topicId)
+                } label: {
+                    Label(parentTopic.title, systemImage: "arrow.turn.up.left")
+                        .font(.subheadline)
+                }
+                .tint(.secondary)
+            }
+        }
+    }
+
+    // MARK: Feedback
+
+    private var feedbackSection: some View {
+        CardContainer {
+            Label("Pending Feedback", systemImage: "bell.badge.fill")
+                .font(.headline)
+                .foregroundStyle(.orange)
+
+            ForEach(pendingFeedback) { request in
+                FeedbackRequestCard(model: model, request: request)
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(.orange.opacity(0.3), lineWidth: 1)
+        )
+    }
+
+    // MARK: Workflow Actions
+
+    private var actionsSection: some View {
+        CardContainer {
+            Label("Workflow", systemImage: "arrow.triangle.branch")
+                .font(.headline)
+
+            // Requirement stage
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Requirement")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    ActionButton("Approve", icon: "checkmark.circle", style: .primary) {
+                        await model.approveRequirement()
+                    }
+                    ActionButton("Refresh", icon: "arrow.clockwise", style: .secondary) {
+                        await model.refreshRequirement(note: refreshNote)
+                    }
+                }
+
+                TextField("Clarification note…", text: $refreshNote)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.footnote)
+            }
+
+            Divider()
+
+            // Plan stage
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Plan")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    ActionButton("Approve", icon: "checkmark.circle", style: .primary) {
+                        await model.approvePlan()
+                    }
+                    ActionButton("Refresh", icon: "arrow.clockwise", style: .secondary) {
+                        await model.refreshPlan()
+                    }
+                }
+            }
+
+            Divider()
+
+            // Testing stage
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Testing")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    ActionButton("Start Testing", icon: "person.fill.checkmark", style: .secondary) {
+                        await model.markHumanTesting()
+                    }
+                    ActionButton("Confirm Passed", icon: "checkmark.seal", style: .primary) {
+                        await model.markPassed()
+                    }
+                }
+            }
+
+            if canArchive {
+                Divider()
+                ActionButton("Archive Topic", icon: "archivebox", style: .primary) {
+                    await model.archiveTopic()
+                }
+            }
+        }
+    }
+
+    // MARK: Run / Agent Launch
+
+    private var runTriggerSection: some View {
+        CardContainer {
+            Label("Launch Run", systemImage: "terminal")
+                .font(.headline)
+
+            Picker("Executor", selection: $selectedExecutor) {
+                Text("Command").tag("command")
+                Text("Claude Agent").tag("claude")
+            }
+            .pickerStyle(.segmented)
+
+            if selectedExecutor == "command" {
+                HStack(spacing: 8) {
+                    TextField("Command", text: $commandText)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.footnote.monospaced())
+
+                    Button {
+                        Task { await model.triggerRun(executor: "command", commandText: commandText) }
+                    } label: {
+                        Image(systemName: "play.fill")
+                            .font(.body)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("The agent will use the topic's requirement and plan as context.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    TextField("Additional instructions (optional)", text: $promptText, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.footnote)
+                        .lineLimit(3...6)
+
+                    if let project = detail.topic.project, !project.isEmpty {
+                        Label("Will run in: \(project)", systemImage: "folder")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button {
+                        Task { await model.triggerRun(executor: "claude", commandText: promptText) }
+                    } label: {
+                        Label("Launch Agent", systemImage: "cpu")
+                            .font(.subheadline.weight(.medium))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                }
+            }
+        }
+    }
+
+    // MARK: Subtopics
+
+    private var subtopicsSection: some View {
+        CardContainer {
+            Label("Subtopics", systemImage: "list.bullet.indent")
+                .font(.headline)
+
+            ForEach(detail.childTopics) { child in
+                Button {
+                    model.selectTopic(child.topicId)
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(child.title)
+                                .font(.subheadline.weight(.medium))
+                            Text(child.summary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(12)
+                    .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    // MARK: Documents
+
+    private var documentsSection: some View {
+        let docs: [(key: String, title: String, icon: String)] = [
+            ("topic.md", "Overview", "doc.text"),
+            ("requirement.md", "Requirement", "checklist"),
+            ("plan.md", "Plan", "map"),
+            ("notes.md", "Notes", "note.text"),
+        ]
+
+        return VStack(spacing: 12) {
+            ForEach(docs, id: \.key) { doc in
+                let content = detail.documents[doc.key] ?? ""
+                if !content.isEmpty {
+                    DocumentSection(title: doc.title, icon: doc.icon, bodyText: content)
+                }
+            }
+        }
+    }
+
+    // MARK: Runs
+
+    private var runsSection: some View {
+        CardContainer {
+            Label("Run History", systemImage: "clock.arrow.circlepath")
+                .font(.headline)
+
+            ForEach(detail.runs) { run in
+                RunCard(run: run)
+            }
+        }
     }
 }
+
+// MARK: - Action Button
+
+private enum ActionButtonStyle {
+    case primary, secondary
+}
+
+private struct ActionButton: View {
+    let title: String
+    let icon: String
+    let style: ActionButtonStyle
+    let action: () async -> Void
+
+    init(_ title: String, icon: String, style: ActionButtonStyle, action: @escaping () async -> Void) {
+        self.title = title
+        self.icon = icon
+        self.style = style
+        self.action = action
+    }
+
+    var body: some View {
+        if style == .primary {
+            button.buttonStyle(.borderedProminent)
+        } else {
+            button.buttonStyle(.bordered)
+        }
+    }
+
+    private var button: some View {
+        Button {
+            Task { await action() }
+        } label: {
+            Label(title, systemImage: icon)
+                .font(.subheadline.weight(.medium))
+        }
+        .controlSize(.small)
+    }
+}
+
+// MARK: - Feedback Card
 
 private struct FeedbackRequestCard: View {
     @ObservedObject var model: AppModel
@@ -359,9 +1511,11 @@ private struct FeedbackRequestCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(request.title)
-                .font(.headline)
+                .font(.subheadline.weight(.semibold))
             Text(request.prompt)
+                .font(.footnote)
                 .foregroundStyle(.secondary)
+
             if !request.options.isEmpty {
                 Picker("Choice", selection: $selectedOption) {
                     ForEach(request.options, id: \.self) { option in
@@ -375,48 +1529,356 @@ private struct FeedbackRequestCard: View {
                     }
                 }
             }
+
             if request.allowNote {
-                TextField("Optional note", text: $note)
+                TextField("Optional note…", text: $note)
                     .textFieldStyle(.roundedBorder)
+                    .font(.footnote)
             }
-            Button("Send Feedback") {
+
+            Button {
                 Task {
                     let selection = selectedOption.isEmpty ? [] : [selectedOption]
                     await model.submitFeedback(requestID: request.requestId, selectedOptions: selection, note: note)
                 }
+            } label: {
+                Label("Send Feedback", systemImage: "paperplane.fill")
+                    .font(.subheadline.weight(.medium))
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
+            .tint(.orange)
+            .controlSize(.small)
         }
-        .padding()
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+        .padding(14)
+        .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+// MARK: - Document Section
+
+// MARK: - README Renderer
+
+private struct ReadmeView: View {
+    let content: String
+
+    private var blocks: [ReadmeBlock] {
+        ReadmeParser.parse(content)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                blockView(block)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .textSelection(.enabled)
+    }
+
+    @ViewBuilder
+    private func blockView(_ block: ReadmeBlock) -> some View {
+        switch block {
+        case .heading(let level, let text):
+            Text(inlineMarkdown(text))
+                .font(headingFont(for: level))
+                .fontWeight(.bold)
+                .padding(.top, level == 1 ? 4 : 2)
+        case .paragraph(let text):
+            Text(inlineMarkdown(text))
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+        case .codeBlock(let code):
+            Text(code)
+                .font(.footnote.monospaced())
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+        case .listItem(let text):
+            HStack(alignment: .top, spacing: 6) {
+                Text("•")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(inlineMarkdown(text))
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        case .blank:
+            EmptyView()
+        }
+    }
+
+    private func headingFont(for level: Int) -> Font {
+        switch level {
+        case 1: return .title2
+        case 2: return .title3
+        case 3: return .headline
+        default: return .subheadline
+        }
+    }
+
+    private func inlineMarkdown(_ text: String) -> AttributedString {
+        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+    }
+}
+
+private enum ReadmeBlock {
+    case heading(level: Int, text: String)
+    case paragraph(String)
+    case codeBlock(String)
+    case listItem(String)
+    case blank
+}
+
+private enum ReadmeParser {
+    static func parse(_ content: String) -> [ReadmeBlock] {
+        var blocks: [ReadmeBlock] = []
+        let lines = content.components(separatedBy: "\n")
+        var i = 0
+        var paragraphLines: [String] = []
+
+        func flushParagraph() {
+            if !paragraphLines.isEmpty {
+                let joined = paragraphLines.joined(separator: " ")
+                blocks.append(.paragraph(joined))
+                paragraphLines.removeAll()
+            }
+        }
+
+        while i < lines.count {
+            let line = lines[i]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.isEmpty {
+                flushParagraph()
+                i += 1
+                continue
+            }
+
+            // Code block
+            if trimmed.hasPrefix("```") {
+                flushParagraph()
+                i += 1
+                var codeLines: [String] = []
+                while i < lines.count && !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                    codeLines.append(lines[i])
+                    i += 1
+                }
+                if i < lines.count { i += 1 }
+                blocks.append(.codeBlock(codeLines.joined(separator: "\n")))
+                continue
+            }
+
+            // Heading
+            if trimmed.hasPrefix("#") {
+                flushParagraph()
+                var level = 0
+                for char in trimmed {
+                    if char == "#" { level += 1 } else { break }
+                }
+                level = min(level, 6)
+                let text = String(trimmed.dropFirst(level)).trimmingCharacters(in: .whitespaces)
+                blocks.append(.heading(level: level, text: text))
+                i += 1
+                continue
+            }
+
+            // List item
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
+                flushParagraph()
+                let text = String(trimmed.dropFirst(2))
+                blocks.append(.listItem(text))
+                i += 1
+                continue
+            }
+
+            // Numbered list
+            if let firstChar = trimmed.first, firstChar.isNumber {
+                if let dotIndex = trimmed.firstIndex(of: "."),
+                   trimmed.distance(from: trimmed.startIndex, to: dotIndex) <= 3,
+                   trimmed.index(after: dotIndex) < trimmed.endIndex,
+                   trimmed[trimmed.index(after: dotIndex)] == " " {
+                    flushParagraph()
+                    let text = String(trimmed[trimmed.index(dotIndex, offsetBy: 2)...])
+                    blocks.append(.listItem(text))
+                    i += 1
+                    continue
+                }
+            }
+
+            paragraphLines.append(trimmed)
+            i += 1
+        }
+        flushParagraph()
+        return blocks
     }
 }
 
 private struct DocumentSection: View {
     let title: String
+    let icon: String
     let bodyText: String
+    @State private var isExpanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.headline)
-            Text(bodyText)
-                .font(.body.monospaced())
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
-                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack {
+                    Label(title, systemImage: icon)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+                .padding(16)
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                Divider()
+                    .padding(.horizontal, 16)
+
+                Text(bodyText)
+                    .font(.callout)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+        }
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+// MARK: - Run Card
+
+private struct RunCard: View {
+    let run: RunRecordModel
+
+    var statusColor: Color {
+        switch run.status {
+        case "success", "passed": .green
+        case "failed", "error": .red
+        case "running", "implementing": .blue
+        default: .secondary
         }
     }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(run.executor, systemImage: "gearshape.2")
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+                Text(run.status.replacingOccurrences(of: "_", with: " "))
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(statusColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(statusColor.opacity(0.12), in: Capsule())
+            }
+
+            if !run.summary.isEmpty {
+                Text(run.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !run.command.isEmpty {
+                Text(run.command.joined(separator: " "))
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            if !run.artifacts.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(run.artifacts, id: \.self) { artifact in
+                        Text(artifact)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+// MARK: - Card Container
+
+private struct CardContainer<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+// MARK: - Status Chip
+
+private enum StatusCategory {
+    case requirement, execution, decision
 }
 
 private struct StatusChip: View {
     let text: String
+    let category: StatusCategory
+
+    private var chipColor: Color {
+        switch category {
+        case .requirement:
+            switch text {
+            case "approved": return .green
+            case "specified": return .teal
+            case "discussed": return .blue
+            case "clarifying": return .orange
+            default: return .secondary
+            }
+        case .execution:
+            switch text {
+            case "passed": return .green
+            case "implemented", "human_testing": return .teal
+            case "implementing", "queued": return .blue
+            case "failed": return .red
+            case "paused": return .orange
+            default: return .secondary
+            }
+        case .decision:
+            switch text {
+            case "archived": return .secondary
+            case "needs_feedback": return .orange
+            case "blocked": return .red
+            case "pending_implementation": return .blue
+            default: return .secondary
+            }
+        }
+    }
 
     var body: some View {
         Text(text.replacingOccurrences(of: "_", with: " "))
-            .font(.caption)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color.accentColor.opacity(0.14), in: Capsule())
+            .font(.caption2.weight(.medium))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .foregroundStyle(chipColor)
+            .background(chipColor.opacity(0.12), in: Capsule())
     }
 }

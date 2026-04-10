@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 
 from .http import create_http_server
+from .projects import ProjectScanner
+from .repo_offload import InitRunner
 from .service import HarnessService
 
 
@@ -13,13 +15,18 @@ def main() -> None:
     parser.add_argument("--workspace", default=".offload", help="Workspace root for topic files and SQLite index.")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host.")
     parser.add_argument("--port", type=int, default=8080, help="Bind port.")
+    parser.add_argument("--projects-root", default=str(Path.home() / "code"), help="Root directory to scan for git projects.")
     args = parser.parse_args()
 
     workspace = Path(args.workspace).resolve()
     service = HarnessService(workspace)
-    server = create_http_server(args.host, args.port, service, auth_token=os.environ.get("OFFLOAD_API_TOKEN"))
+    projects_root = Path(args.projects_root).resolve() if args.projects_root else None
+    init_runner = InitRunner(event_bus=service.event_bus)
+    scanner = ProjectScanner(projects_root, init_runner=init_runner)
+    server = create_http_server(args.host, args.port, service, scanner=scanner, init_runner=init_runner, auth_token=os.environ.get("OFFLOAD_API_TOKEN"))
     try:
         print(f"Offload server listening on http://{args.host}:{args.port} with workspace {workspace}")
+        print(f"Projects root: {projects_root}")
         server.serve_forever()
     except KeyboardInterrupt:
         pass

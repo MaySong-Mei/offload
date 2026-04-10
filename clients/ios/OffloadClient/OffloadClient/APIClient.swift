@@ -1,4 +1,7 @@
 import Foundation
+import OSLog
+
+private let log = Logger(subsystem: "com.offload.client", category: "APIClient")
 
 struct APIError: LocalizedError {
     let message: String
@@ -36,20 +39,67 @@ struct APIClient {
         try await send("/feedback-queue", response: FeedbackQueueResponse.self).feedbackRequests
     }
 
-    func createTopic(title: String, rawInput: String, tags: [String], parentTopicID: String? = nil) async throws -> TopicDetailResponse {
+    func fetchProjects() async throws -> [ProjectInfo] {
+        try await send("/projects", response: ProjectListResponse.self).projects
+    }
+
+    func fetchReadme(projectPath: String) async throws -> String {
+        let encoded = projectPath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? projectPath
+        return try await send("/projects/readme?path=\(encoded)", response: ReadmeResponse.self).content
+    }
+
+    func fetchInitLog(projectPath: String) async throws -> InitLogResponse {
+        let encoded = projectPath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? projectPath
+        return try await send("/projects/init-log?path=\(encoded)", response: InitLogResponse.self)
+    }
+
+    func initializeProject(projectPath: String) async throws {
+        struct Body: Codable { let path: String }
+        struct Resp: Codable { let status: String }
+        _ = try await send(
+            "/projects/initialize",
+            method: "POST",
+            body: Body(path: projectPath),
+            response: Resp.self
+        )
+    }
+
+    func cancelInit(projectPath: String) async throws {
+        struct Body: Codable { let path: String }
+        struct Resp: Codable { let status: String }
+        _ = try await send(
+            "/projects/cancel-init",
+            method: "POST",
+            body: Body(path: projectPath),
+            response: Resp.self
+        )
+    }
+
+    func uninitializeProject(projectPath: String) async throws {
+        struct Body: Codable { let path: String }
+        struct Resp: Codable { let status: String }
+        _ = try await send(
+            "/projects/uninitialize",
+            method: "POST",
+            body: Body(path: projectPath),
+            response: Resp.self
+        )
+    }
+
+    func createTopic(title: String, rawInput: String, tags: [String], project: String? = nil, parentTopicID: String? = nil) async throws -> TopicDetailResponse {
         try await send(
             "/topics",
             method: "POST",
-            body: TopicCreateRequest(title: title, rawInput: rawInput, tags: tags, parentTopicId: parentTopicID),
+            body: TopicCreateRequest(title: title, rawInput: rawInput, tags: tags, parentTopicId: parentTopicID, project: project),
             response: TopicDetailResponse.self
         )
     }
 
-    func createSubtopic(parentTopicID: String, title: String, rawInput: String, tags: [String]) async throws -> TopicDetailResponse {
+    func createSubtopic(parentTopicID: String, title: String, rawInput: String, tags: [String], project: String? = nil) async throws -> TopicDetailResponse {
         try await send(
             "/topics/\(parentTopicID)/subtopics",
             method: "POST",
-            body: TopicCreateRequest(title: title, rawInput: rawInput, tags: tags, parentTopicId: parentTopicID),
+            body: TopicCreateRequest(title: title, rawInput: rawInput, tags: tags, parentTopicId: parentTopicID, project: project),
             response: TopicDetailResponse.self
         )
     }
@@ -104,11 +154,11 @@ struct APIClient {
         )
     }
 
-    func triggerRun(topicID: String, command: [String]) async throws -> RunRecordModel {
+    func triggerRun(topicID: String, executor: String, command: [String]) async throws -> RunRecordModel {
         try await send(
             "/topics/\(topicID)/runs",
             method: "POST",
-            body: RunCreateRequest(executor: "command", command: command),
+            body: RunCreateRequest(executor: executor, command: command),
             response: RunRecordModel.self
         )
     }
@@ -174,7 +224,10 @@ struct APIClient {
         bodyData: Data?,
         response: Response.Type
     ) async throws -> Response {
-        let url = baseURL.appending(path: path)
+        // Use URL(string:relativeTo:) to preserve query strings — appending(path:) encodes '?' as '%3F'
+        guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
+            throw APIError(message: "Invalid URL path: \(path)")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -182,17 +235,25 @@ struct APIClient {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         request.httpBody = bodyData
-        let (data, urlResponse) = try await session.data(for: request)
-        guard let httpResponse = urlResponse as? HTTPURLResponse else {
-            throw APIError(message: "Unexpected response.")
-        }
-        guard (200 ..< 300).contains(httpResponse.statusCode) else {
-            if let message = try? decoder.decode(ServerErrorEnvelope.self, from: data).error {
-                throw APIError(message: message)
+        log.debug("→ \(method, privacy: .public) \(url.absoluteString, privacy: .public)")
+        do {
+            let (data, urlResponse) = try await session.data(for: request)
+            guard let httpResponse = urlResponse as? HTTPURLResponse else {
+                log.error("← \(method, privacy: .public) \(path, privacy: .public) - non-HTTP response")
+                throw APIError(message: "Unexpected response.")
             }
-            throw APIError(message: "Request failed with status \(httpResponse.statusCode).")
+            log.debug("← \(httpResponse.statusCode) \(method, privacy: .public) \(path, privacy: .public) (\(data.count) bytes)")
+            guard (200 ..< 300).contains(httpResponse.statusCode) else {
+                if let message = try? decoder.decode(ServerErrorEnvelope.self, from: data).error {
+                    throw APIError(message: message)
+                }
+                throw APIError(message: "Request failed with status \(httpResponse.statusCode).")
+            }
+            return try decoder.decode(Response.self, from: data)
+        } catch {
+            log.error("✗ \(method, privacy: .public) \(path, privacy: .public) - \(error.localizedDescription, privacy: .public)")
+            throw error
         }
-        return try decoder.decode(Response.self, from: data)
     }
 
     private func websocketScheme(for scheme: String) -> String {

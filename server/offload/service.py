@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .database import IndexStore
 from .event_bus import EventBus
-from .executors import CommandExecutor, Executor
+from .executors import ClaudeExecutor, CommandExecutor, Executor
 from .models import (
     DecisionState,
     EventRecord,
@@ -44,6 +44,7 @@ class HarnessService:
         self.event_bus = EventBus()
         self.executors: Dict[str, Executor] = {
             CommandExecutor.name: CommandExecutor(),
+            ClaudeExecutor.name: ClaudeExecutor(),
         }
         self._lock = threading.RLock()
         self._run_threads: Dict[str, threading.Thread] = {}
@@ -63,10 +64,10 @@ class HarnessService:
                 state = self.workspace.load_state(topic_id)
                 self.store.upsert_topic(state)
                 for name, payload in self.workspace.load_feedback_files(topic_id):
-                    if payload.get("request_id"):
-                        self.store.upsert_feedback_request(FeedbackRequest.from_json_dict(payload))
-                    elif payload.get("response_id"):
+                    if payload.get("response_id"):
                         self.store.insert_feedback_response(FeedbackResponse.from_json_dict(payload))
+                    elif payload.get("request_id"):
+                        self.store.upsert_feedback_request(FeedbackRequest.from_json_dict(payload))
                 for run in self.workspace.load_runs(topic_id):
                     self.store.upsert_run(run)
 
@@ -461,7 +462,19 @@ class HarnessService:
                 started_event = self._record_event("run.started", topic_id=topic_id, run_id=run_id, payload={"run": run.to_json_dict()})
                 self.event_bus.publish(started_event)
 
-            result = executor.execute(self.workspace.topic_dir(topic_id), command=command or None)
+            context: Dict[str, Any] = {}
+            state_ctx = self.store.get_topic(topic_id)
+            if state_ctx and state_ctx.project:
+                project_path = Path(state_ctx.project)
+                if project_path.is_dir():
+                    context["workspace_dir"] = str(project_path)
+                    # Load .offload/context/*.md as persistent project knowledge
+                    from .repo_offload import RepoOffload
+                    repo = RepoOffload(project_path)
+                    offload_context = repo.read_context()
+                    if offload_context:
+                        context["project_context"] = offload_context
+            result = executor.execute(self.workspace.topic_dir(topic_id), command=command or None, context=context)
 
             with self._lock:
                 state = self._require_topic(topic_id)

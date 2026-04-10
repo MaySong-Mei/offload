@@ -107,6 +107,66 @@ struct EventEnvelope: Codable {
     let eventType: String
     let topicId: String?
     let runId: String?
+    let payload: [String: AnyCodable]?
+}
+
+/// Lightweight wrapper for heterogeneous JSON payloads.
+struct AnyCodable: Codable, Hashable {
+    let value: String  // stored as string for simplicity
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let s = try? container.decode(String.self) {
+            value = s
+        } else if let i = try? container.decode(Int.self) {
+            value = String(i)
+        } else if let b = try? container.decode(Bool.self) {
+            value = String(b)
+        } else if let d = try? container.decode(Double.self) {
+            value = String(d)
+        } else {
+            value = ""
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(value)
+    }
+}
+
+struct ProjectInfo: Codable, Identifiable, Hashable {
+    let name: String
+    let path: String
+    let hasReadme: Bool
+    let isInitialized: Bool
+    let initStatus: String
+    let summary: String?
+    let initError: String?
+
+    var id: String { path }
+
+    var statusLabel: String {
+        switch initStatus {
+        case "ready": return "Ready"
+        case "initializing": return "Initializing…"
+        case "failed": return "Failed"
+        default: return "Not Initialized"
+        }
+    }
+}
+
+struct ProjectListResponse: Codable {
+    let projects: [ProjectInfo]
+}
+
+struct ReadmeResponse: Codable {
+    let content: String
+}
+
+struct InitLogResponse: Codable {
+    let log: [String]
+    let status: String
 }
 
 struct TopicCreateRequest: Codable {
@@ -114,6 +174,7 @@ struct TopicCreateRequest: Codable {
     let rawInput: String
     let tags: [String]
     let parentTopicId: String?
+    let project: String?
 }
 
 struct FeedbackResponseRequest: Codable {

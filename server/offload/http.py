@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
+from .projects import ProjectScanner
+from .repo_offload import InitRunner, RepoOffload
 from .service import HarnessService, NotFoundError, ValidationError
 
 
@@ -29,16 +31,18 @@ class AuthConfig:
 class HarnessHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
-    def __init__(self, server_address, RequestHandlerClass, service: HarnessService, auth: AuthConfig):
+    def __init__(self, server_address, RequestHandlerClass, service: HarnessService, auth: AuthConfig, scanner: Optional[ProjectScanner] = None, init_runner: Optional[InitRunner] = None):
         super().__init__(server_address, RequestHandlerClass)
         self.service = service
         self.auth = auth
+        self.scanner = scanner or ProjectScanner(None)
+        self.init_runner = init_runner or InitRunner()
 
 
-def create_http_server(host: str, port: int, service: HarnessService, auth_token: Optional[str] = None) -> HarnessHTTPServer:
+def create_http_server(host: str, port: int, service: HarnessService, scanner: Optional[ProjectScanner] = None, init_runner: Optional[InitRunner] = None, auth_token: Optional[str] = None) -> HarnessHTTPServer:
     auth = AuthConfig(auth_token)
     handler = make_handler()
-    return HarnessHTTPServer((host, port), handler, service, auth)
+    return HarnessHTTPServer((host, port), handler, service, auth, scanner=scanner, init_runner=init_runner)
 
 
 def make_handler():
@@ -63,6 +67,26 @@ def make_handler():
             if parsed.path == "/feedback-queue":
                 self._write_json(HTTPStatus.OK, {"feedback_requests": self.server.service.list_feedback_queue()})
                 return
+            if parsed.path == "/projects":
+                projects = [p.to_json_dict() for p in self.server.scanner.list_projects()]
+                self._write_json(HTTPStatus.OK, {"projects": projects})
+                return
+            if parsed.path == "/projects/init-log":
+                query = parse_qs(parsed.query)
+                project_path = query.get("path", [""])[0]
+                log_lines = self.server.init_runner.get_log(project_path)
+                status = self.server.init_runner.status(project_path)
+                self._write_json(HTTPStatus.OK, {"log": log_lines, "status": status})
+                return
+            if parsed.path == "/projects/readme":
+                query = parse_qs(parsed.query)
+                project_path = query.get("path", [""])[0]
+                content = self.server.scanner.read_readme(project_path)
+                if content is None:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"error": "README not found or path not allowed"})
+                    return
+                self._write_json(HTTPStatus.OK, {"content": content})
+                return
             if parsed.path == "/events":
                 query = parse_qs(parsed.query)
                 after = int(query.get("after", ["0"])[0])
@@ -86,6 +110,73 @@ def make_handler():
             parsed = urlparse(self.path)
             payload = self._read_json_body()
             try:
+                if parsed.path == "/projects/cancel-init":
+                    project_path = payload.get("path", "")
+                    if not project_path:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'path'"})
+                        return
+                    cancelled = self.server.init_runner.cancel(project_path)
+                    if cancelled:
+                        self._write_json(HTTPStatus.OK, {"status": "cancelled", "path": project_path})
+                    else:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "No running init for this project"})
+                    return
+                if parsed.path == "/projects/uninitialize":
+                    project_path = payload.get("path", "")
+                    if not project_path:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'path'"})
+                        return
+                    scanner_root = self.server.scanner.root
+                    if scanner_root is None:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Server has no projects root configured"})
+                        return
+                    target = Path(project_path).resolve()
+                    try:
+                        target.relative_to(scanner_root)
+                    except ValueError:
+                        self._write_json(HTTPStatus.FORBIDDEN, {"error": "Path is not under projects root"})
+                        return
+                    if not target.is_dir():
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "Project directory not found"})
+                        return
+                    # Don't allow uninstall while an init is running
+                    if self.server.init_runner.is_running(str(target)):
+                        self._write_json(HTTPStatus.CONFLICT, {"error": "Init is currently running for this project"})
+                        return
+                    repo = RepoOffload(target)
+                    try:
+                        repo.uninstall(remove_gitignore_entry=True)
+                    except OSError as e:
+                        self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Uninstall failed: {e}"})
+                        return
+                    self.server.init_runner.forget(str(target))
+                    self._write_json(HTTPStatus.OK, {"status": "uninstalled", "path": str(target)})
+                    return
+                if parsed.path == "/projects/initialize":
+                    project_path = payload.get("path", "")
+                    if not project_path:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'path'"})
+                        return
+                    # Verify the path is a real directory inside the scanner root (security)
+                    scanner_root = self.server.scanner.root
+                    if scanner_root is None:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Server has no projects root configured"})
+                        return
+                    target = Path(project_path).resolve()
+                    try:
+                        target.relative_to(scanner_root)
+                    except ValueError:
+                        self._write_json(HTTPStatus.FORBIDDEN, {"error": "Path is not under projects root"})
+                        return
+                    if not target.is_dir():
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "Project directory not found"})
+                        return
+                    started = self.server.init_runner.trigger(str(target))
+                    self._write_json(
+                        HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT,
+                        {"status": "initializing" if started else "already_running", "path": str(target)},
+                    )
+                    return
                 if parsed.path == "/topics":
                     detail = self.server.service.create_topic(
                         title=payload.get("title", ""),
@@ -169,7 +260,11 @@ def make_handler():
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"Missing field: {error.args[0]}"})
 
         def log_message(self, format: str, *args: Any) -> None:
-            return
+            import sys
+            from datetime import datetime
+            ts = datetime.now().strftime("%H:%M:%S")
+            sys.stderr.write(f"[{ts}] {self.address_string()} - {format % args}\n")
+            sys.stderr.flush()
 
         def _authorize(self) -> bool:
             headers = {key: value for key, value in self.headers.items()}
@@ -201,6 +296,7 @@ def make_handler():
             return None
 
         def _handle_websocket(self) -> None:
+            self.log_message("WebSocket upgrade from %s", self.address_string())
             key = self.headers.get("Sec-WebSocket-Key")
             if not key:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing Sec-WebSocket-Key"})
