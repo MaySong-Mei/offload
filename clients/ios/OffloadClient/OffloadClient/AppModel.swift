@@ -23,6 +23,9 @@ final class AppModel: ObservableObject {
     @Published var projects: [ProjectInfo] = []
     @Published var selectedProjectKey: String? = nil  // path of project, "" for ungrouped, nil for none
     @Published var projectInitLogs: [String: [String]] = [:]
+    @Published var projectActivity: ProjectActivityResponse?
+    @Published var agentStatuses: [AgentStatusModel] = []
+    @Published var isCheckingAgents = false
 
     // Combined list: server-discovered projects + projects referenced by topics + ungrouped slot
     var allProjectGroups: [(key: String, name: String, hasReadme: Bool, topicCount: Int)] {
@@ -179,10 +182,8 @@ final class AppModel: ObservableObject {
             try? await localStore.saveTopics(topics)
             try? await localStore.saveFeedbackQueue(feedbackQueue)
 
-            if selectedTopicID == nil {
-                selectedTopicID = topics.first?.topicId
-            }
-            if let selectedTopicID {
+            // If a topic is already selected, refresh its detail
+            if let selectedTopicID, topics.contains(where: { $0.topicId == selectedTopicID }) {
                 selectedTopicDetail = try await client.fetchTopicDetail(topicID: selectedTopicID)
                 try? await localStore.saveTopicDetail(selectedTopicDetail!, topicID: selectedTopicID)
             }
@@ -469,6 +470,26 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func fetchActivity(projectPath: String) async {
+        guard let client = makeClient() else { return }
+        do {
+            projectActivity = try await client.fetchProjectActivity(projectPath: projectPath)
+        } catch {
+            print("[Activity] fetch failed for \(projectPath): \(error)")
+        }
+    }
+
+    func fetchAgentStatuses() async {
+        guard let client = makeClient() else { return }
+        isCheckingAgents = true
+        do {
+            agentStatuses = try await client.fetchAgentStatus()
+        } catch {
+            print("[Agents] fetch failed: \(error)")
+        }
+        isCheckingAgents = false
+    }
+
     func fetchReadme(projectPath: String) async -> String? {
         guard let client = makeClient() else { return nil }
         return try? await client.fetchReadme(projectPath: projectPath)
@@ -527,6 +548,34 @@ final class AppModel: ObservableObject {
                 for try await event in stream {
                     if Task.isCancelled { break }
                     if event.eventType == "heartbeat" || event.eventType == "hello" {
+                        continue
+                    }
+                    // Run/topic events → targeted partial refresh (not full reload)
+                    if event.eventType == "run.finished" || event.eventType == "run.started" || event.eventType == "topic.updated" {
+                        let affectedTopicId = event.payload?["topic_id"]?.value
+                            ?? event.topicId
+
+                        // 1. Refresh only the affected topic if it's currently selected
+                        if let tid = affectedTopicId, tid == self.selectedTopicID {
+                            await self.refreshTopic(topicID: tid)
+                        }
+
+                        // 2. Refresh topics list (lightweight — just summaries)
+                        if let client = self.makeClient() {
+                            if let fresh = try? await client.fetchTopics() {
+                                self.topics = fresh
+                            }
+                            if let fresh = try? await client.fetchFeedbackQueue() {
+                                self.feedbackQueue = fresh
+                            }
+                        }
+
+                        // 3. Refresh activity only for the current project dashboard
+                        if event.eventType == "run.finished" {
+                            if let key = self.selectedProjectKey, !key.isEmpty {
+                                await self.fetchActivity(projectPath: key)
+                            }
+                        }
                         continue
                     }
                     // Handle init events without full reload

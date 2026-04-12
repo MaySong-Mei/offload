@@ -71,6 +71,12 @@ def make_handler():
                 projects = [p.to_json_dict() for p in self.server.scanner.list_projects()]
                 self._write_json(HTTPStatus.OK, {"projects": projects})
                 return
+            if parsed.path == "/projects/activity":
+                query = parse_qs(parsed.query)
+                project_path = query.get("path", [""])[0]
+                activity = self.server.scanner.get_project_activity(project_path, service=self.server.service)
+                self._write_json(HTTPStatus.OK, activity)
+                return
             if parsed.path == "/projects/init-log":
                 query = parse_qs(parsed.query)
                 project_path = query.get("path", [""])[0]
@@ -86,6 +92,48 @@ def make_handler():
                     self._write_json(HTTPStatus.NOT_FOUND, {"error": "README not found or path not allowed"})
                     return
                 self._write_json(HTTPStatus.OK, {"content": content})
+                return
+            if parsed.path == "/projects/architecture":
+                query = parse_qs(parsed.query)
+                project_path = query.get("path", [""])[0]
+                tree = self.server.scanner.get_architecture_tree(project_path)
+                if tree is None:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"error": "No architecture data"})
+                    return
+                self._write_json(HTTPStatus.OK, {"tree": tree})
+                return
+            if parsed.path == "/projects/files":
+                query = parse_qs(parsed.query)
+                project_path = query.get("path", [""])[0]
+                rel = query.get("rel", [""])[0]  # relative path within project
+                if not project_path:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'path'"})
+                    return
+                result = self.server.scanner.list_files(project_path, rel)
+                if result is None:
+                    self._write_json(HTTPStatus.FORBIDDEN, {"error": "Path not allowed"})
+                    return
+                self._write_json(HTTPStatus.OK, result)
+                return
+            if parsed.path == "/projects/file-content":
+                query = parse_qs(parsed.query)
+                project_path = query.get("path", [""])[0]
+                rel = query.get("rel", [""])[0]
+                if not project_path or not rel:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'path' or 'rel'"})
+                    return
+                result = self.server.scanner.read_file(project_path, rel)
+                if result is None:
+                    self._write_json(HTTPStatus.FORBIDDEN, {"error": "Path not allowed or file not found"})
+                    return
+                self._write_json(HTTPStatus.OK, result)
+                return
+            if parsed.path == "/agents/status":
+                agents = []
+                for executor in self.server.service.executors.values():
+                    if hasattr(executor, "check_status"):
+                        agents.append(executor.check_status().to_dict())
+                self._write_json(HTTPStatus.OK, {"agents": agents})
                 return
             if parsed.path == "/events":
                 query = parse_qs(parsed.query)

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .database import IndexStore
 from .event_bus import EventBus
-from .executors import ClaudeExecutor, CommandExecutor, Executor
+from .agents import ALL_EXECUTORS, Executor
 from .models import (
     DecisionState,
     EventRecord,
@@ -43,8 +43,7 @@ class HarnessService:
         self.planner = TopicPlanner()
         self.event_bus = EventBus()
         self.executors: Dict[str, Executor] = {
-            CommandExecutor.name: CommandExecutor(),
-            ClaudeExecutor.name: ClaudeExecutor(),
+            cls.name: cls() for cls in ALL_EXECUTORS
         }
         self._lock = threading.RLock()
         self._run_threads: Dict[str, threading.Thread] = {}
@@ -514,7 +513,11 @@ class HarnessService:
                 self.event_bus.publish(started_event)
 
             context: Dict[str, Any] = {}
+            # Tell the agent where to write its structured report
             state_ctx = self.store.get_topic(topic_id)
+            report_dir = self.workspace.topic_dir(topic_id, project=state_ctx.project if state_ctx else None) / f"artifacts/{run_id}"
+            report_dir.mkdir(parents=True, exist_ok=True)
+            context["report_path"] = str(report_dir / "report.md")
             if state_ctx and state_ctx.project:
                 project_path = Path(state_ctx.project)
                 if project_path.is_dir():

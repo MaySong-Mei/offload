@@ -53,7 +53,14 @@ private struct ProjectsView: View {
     var body: some View {
         List(selection: Binding(
             get: { model.selectedProjectKey },
-            set: { model.selectedProjectKey = $0 }
+            set: { newKey in
+                // Clear topic selection when switching projects to stop at dashboard
+                if newKey != model.selectedProjectKey {
+                    model.selectedTopicID = nil
+                    model.selectedTopicDetail = nil
+                }
+                model.selectedProjectKey = newKey
+            }
         )) {
             Section {
                 ForEach(model.projects) { project in
@@ -384,6 +391,26 @@ private struct ProjectDashboardView: View {
             get: { model.selectedTopicID },
             set: { model.selectTopic($0) }
         )) {
+            // Meta Card → taps through to project detail
+            if let activity = model.projectActivity {
+                Section {
+                    NavigationLink {
+                        ProjectDetailView(model: model, activity: activity, readmeContent: readmeContent)
+                    } label: {
+                        ProjectMetaCard(activity: activity)
+                    }
+                }
+            }
+
+            // Recent Agent Changes
+            if let activity = model.projectActivity, !activity.recentRuns.isEmpty {
+                Section {
+                    recentChangesSection(runs: activity.recentRuns, commits: activity.recentCommits)
+                } header: {
+                    Label("Recent Changes", systemImage: "clock.arrow.circlepath")
+                }
+            }
+
             // Section 1: Action Required
             if actionRequiredCount > 0 {
                 Section {
@@ -412,35 +439,48 @@ private struct ProjectDashboardView: View {
 
             // Section 4: All Topics
             Section {
-                ForEach(topics) { topic in
-                    TopicRow(topic: topic)
-                        .tag(topic.topicId)
+                if topics.isEmpty {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 8) {
+                            Text("No topics yet")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            Button("New Topic") { showingNewTopicSheet = true }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                        }
+                        .padding(.vertical, 12)
+                        Spacer()
+                    }
+                } else {
+                    ForEach(topics) { topic in
+                        TopicRow(topic: topic)
+                            .tag(topic.topicId)
+                    }
                 }
             } header: {
                 Label("All Topics (\(topics.count))", systemImage: "list.bullet")
             }
 
-            // Section 5: Project Context
-            Section {
-                projectContextSection
-            } header: {
-                Label("Project Context", systemImage: "book.closed")
-            }
-        }
-        .listStyle(.insetGrouped)
-        .overlay {
-            if topics.isEmpty && actionRequiredCount == 0 {
-                ContentUnavailableView {
-                    Label("No Topics", systemImage: "tray")
-                } description: {
-                    Text("Create a topic to start working on this project.")
-                } actions: {
-                    Button("New Topic") { showingNewTopicSheet = true }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
+            // Section 5: README (if no meta card yet, keep accessible)
+            if model.projectActivity == nil, let readme = readmeContent, !readme.isEmpty {
+                Section {
+                    NavigationLink {
+                        ScrollView {
+                            ReadmeView(content: readme).padding()
+                        }
+                        .navigationTitle("README")
+                        .navigationBarTitleDisplayMode(.inline)
+                    } label: {
+                        Label("README", systemImage: "doc.text.fill")
+                    }
+                } header: {
+                    Label("Project Context", systemImage: "book.closed")
                 }
             }
         }
+        .listStyle(.insetGrouped)
         .navigationTitle(projectName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -451,7 +491,17 @@ private struct ProjectDashboardView: View {
             }
         }
         .task(id: model.selectedProjectKey) {
+            model.projectActivity = nil
             await loadReadme()
+            if let key = model.selectedProjectKey, !key.isEmpty {
+                await model.fetchActivity(projectPath: key)
+            }
+        }
+        .onAppear {
+            // Re-fetch activity when view reappears (e.g. navigating back on iPhone)
+            if let key = model.selectedProjectKey, !key.isEmpty {
+                Task { await model.fetchActivity(projectPath: key) }
+            }
         }
     }
 
@@ -577,50 +627,730 @@ private struct ProjectDashboardView: View {
         }
     }
 
-    // MARK: Section 5 — Project Context
+    // MARK: Recent Changes
 
     @ViewBuilder
-    private var projectContextSection: some View {
-        if let readme = readmeContent, !readme.isEmpty {
-            NavigationLink {
-                ScrollView {
-                    ReadmeView(content: readme)
-                        .padding()
-                }
-                .navigationTitle("README")
-                .navigationBarTitleDisplayMode(.inline)
-            } label: {
-                Label("README", systemImage: "doc.text.fill")
-            }
-        }
-        if let project = selectedProject {
-            if project.isInitialized {
-                NavigationLink {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 16) {
-                            if let summary = project.summary {
-                                Text(summary)
-                                    .font(.body)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding()
+    private func recentChangesSection(runs: [RecentRun], commits: [RecentCommit]) -> some View {
+        ForEach(runs.prefix(5)) { run in
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Image(systemName: run.status == "succeeded" ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(run.status == "succeeded" ? .green : .red)
+                        .font(.caption)
+                    Text(run.topicTitle)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                    Spacer()
+                    if let date = run.finishedAt {
+                        Text(Self.relativeTime(date))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
-                    .navigationTitle("Project Summary")
-                    .navigationBarTitleDisplayMode(.inline)
-                } label: {
-                    Label("Summary & Context", systemImage: "brain")
                 }
+                if let excerpt = run.reportExcerpt, !excerpt.isEmpty {
+                    Text(excerpt)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+        if !commits.isEmpty {
+            DisclosureGroup {
+                ForEach(commits.prefix(5)) { commit in
+                    HStack(spacing: 8) {
+                        Text(commit.hash)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.tertiary)
+                        Text(commit.message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            } label: {
+                Label("Git Commits", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
             }
         }
     }
 
+    private static func relativeTime(_ isoDate: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = formatter.date(from: isoDate) ?? ISO8601DateFormatter().date(from: isoDate) else {
+            return isoDate.prefix(10).description
+        }
+        let interval = Date.now.timeIntervalSince(date)
+        if interval < 60 { return "just now" }
+        if interval < 3600 { return "\(Int(interval / 60))m ago" }
+        if interval < 86400 { return "\(Int(interval / 3600))h ago" }
+        return "\(Int(interval / 86400))d ago"
+    }
+
+    // MARK: Section 5 — Project Context
+
+    @ViewBuilder
     private func loadReadme() async {
         guard let key = model.selectedProjectKey, !key.isEmpty else {
             readmeContent = nil
             return
         }
         readmeContent = await model.fetchReadme(projectPath: key)
+    }
+}
+
+// MARK: - Project Meta Card
+
+private struct ProjectMetaCard: View {
+    let activity: ProjectActivityResponse
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header
+            HStack(spacing: 12) {
+                Image(systemName: "folder.fill")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(activity.meta.name)
+                        .font(.title3.weight(.bold))
+                    if let summary = activity.meta.summary {
+                        Text(summary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                    }
+                }
+            }
+
+            // Stats row
+            HStack(spacing: 0) {
+                StatBadge(label: "Topics", value: activity.meta.topicStats.total, color: .primary)
+                Spacer()
+                StatBadge(label: "Active", value: activity.meta.topicStats.active, color: .blue)
+                Spacer()
+                StatBadge(label: "Done", value: activity.meta.topicStats.completed, color: .green)
+                Spacer()
+                StatBadge(label: "Archived", value: activity.meta.topicStats.archived, color: .secondary)
+            }
+            .padding(.vertical, 4)
+
+            // Architecture excerpt
+            if let arch = activity.meta.architectureExcerpt, !arch.isEmpty {
+                Text(arch)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(4)
+    }
+}
+
+private struct StatBadge: View {
+    let label: String
+    let value: Int
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text("\(value)")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(value > 0 ? color : .secondary)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(minWidth: 50)
+    }
+}
+
+// MARK: - Project Detail View (from Meta Card tap)
+
+private struct ProjectDetailView: View {
+    @ObservedObject var model: AppModel
+    let activity: ProjectActivityResponse
+    let readmeContent: String?
+
+    var body: some View {
+        List {
+            // Summary
+            if let summary = activity.meta.summary {
+                Section {
+                    Text(summary)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Label("Summary", systemImage: "text.alignleft")
+                }
+            }
+
+            // Architecture — interactive tree
+            if activity.meta.architectureExcerpt != nil {
+                Section {
+                    NavigationLink {
+                        ArchitectureTreeView(model: model, projectPath: activity.meta.path)
+                    } label: {
+                        HStack {
+                            Label("Architecture Map", systemImage: "building.columns")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                } header: {
+                    Label("Architecture", systemImage: "building.columns")
+                }
+            }
+
+            // Stats
+            Section {
+                HStack(spacing: 0) {
+                    StatBadge(label: "Topics", value: activity.meta.topicStats.total, color: .primary)
+                    Spacer()
+                    StatBadge(label: "Active", value: activity.meta.topicStats.active, color: .blue)
+                    Spacer()
+                    StatBadge(label: "Done", value: activity.meta.topicStats.completed, color: .green)
+                    Spacer()
+                    StatBadge(label: "Archived", value: activity.meta.topicStats.archived, color: .secondary)
+                }
+            } header: {
+                Label("Topic Stats", systemImage: "chart.bar")
+            }
+
+            // Recent Commits
+            if !activity.recentCommits.isEmpty {
+                Section {
+                    ForEach(activity.recentCommits.prefix(8)) { commit in
+                        HStack(spacing: 8) {
+                            Text(commit.hash)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 65, alignment: .leading)
+                            Text(commit.message)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                } header: {
+                    Label("Recent Commits", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                }
+            }
+
+            // README
+            if let readme = readmeContent, !readme.isEmpty {
+                Section {
+                    NavigationLink {
+                        ScrollView {
+                            ReadmeView(content: readme).padding()
+                        }
+                        .navigationTitle("README")
+                        .navigationBarTitleDisplayMode(.inline)
+                    } label: {
+                        Label("README", systemImage: "doc.text.fill")
+                    }
+                }
+            }
+
+            // File Browser
+            Section {
+                NavigationLink {
+                    FileBrowserView(model: model, projectPath: activity.meta.path, rel: "")
+                } label: {
+                    Label("Browse Files", systemImage: "folder")
+                }
+            } header: {
+                Label("Files", systemImage: "doc.on.doc")
+            } footer: {
+                Text(activity.meta.path)
+                    .font(.caption2.monospaced())
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle(activity.meta.name)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Architecture Tree (interactive top-down)
+
+private struct ArchitectureTreeView: View {
+    @ObservedObject var model: AppModel
+    let projectPath: String
+
+    @State private var tree: ArchNode?
+    @State private var isLoading = true
+
+    var body: some View {
+        Group {
+            if isLoading {
+                ProgressView("Loading architecture…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let tree {
+                ScrollView([.horizontal, .vertical]) {
+                    VStack(spacing: 0) {
+                        ArchNodeCard(node: tree, depth: 0)
+                    }
+                    .padding(20)
+                }
+            } else {
+                ContentUnavailableView {
+                    Label("No Architecture", systemImage: "building.columns")
+                } description: {
+                    Text("Initialize this project to generate architecture data.")
+                }
+            }
+        }
+        .navigationTitle("Architecture")
+        .navigationBarTitleDisplayMode(.inline)
+        .background(Color(.systemGroupedBackground))
+        .task { await load() }
+    }
+
+    private func load() async {
+        guard let url = URL(string: model.serverURLString) else {
+            isLoading = false
+            return
+        }
+        let client = APIClient(baseURL: url, token: model.apiToken)
+        tree = try? await client.fetchArchitectureTree(projectPath: projectPath)
+        isLoading = false
+    }
+}
+
+/// A single node in the architecture tree — recursively renders children.
+private struct ArchNodeCard: View {
+    let node: ArchNode
+    let depth: Int
+
+    @State private var isExpanded = true
+    @State private var showDetail = false
+
+    private var hasChildren: Bool { !node.children.isEmpty }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // This node's card
+            Button {
+                if hasChildren {
+                    withAnimation(.easeInOut(duration: 0.25)) { isExpanded.toggle() }
+                } else {
+                    showDetail = true
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: nodeIcon)
+                        .font(.caption)
+                        .foregroundStyle(nodeColor)
+                        .frame(width: 18)
+
+                    Text(node.label)
+                        .font(labelFont)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    if hasChildren {
+                        Text("(\(node.children.count))")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    Spacer(minLength: 4)
+
+                    if hasChildren {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(cardBackground, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(nodeColor.opacity(0.3), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .sheet(isPresented: $showDetail) {
+                ArchNodeDetailSheet(node: node)
+            }
+
+            // Connector line + children
+            if hasChildren && isExpanded {
+                // Vertical connector
+                Rectangle()
+                    .fill(nodeColor.opacity(0.3))
+                    .frame(width: 1.5, height: 12)
+
+                // Children
+                VStack(spacing: 6) {
+                    ForEach(node.children) { child in
+                        HStack(alignment: .top, spacing: 0) {
+                            // Horizontal connector
+                            Rectangle()
+                                .fill(nodeColor.opacity(0.2))
+                                .frame(width: 16, height: 1.5)
+                                .padding(.top, 14)
+
+                            ArchNodeCard(node: child, depth: depth + 1)
+                        }
+                    }
+                }
+                .padding(.leading, 20)
+            }
+        }
+        .frame(minWidth: depth == 0 ? 280 : 200, alignment: .leading)
+        .onAppear {
+            // Auto-collapse deep nodes
+            if depth >= 2 { isExpanded = false }
+        }
+    }
+
+    private var nodeIcon: String {
+        switch node.type {
+        case "project": return "folder.fill"
+        case "group": return "square.stack.3d.up"
+        case "layer": return "rectangle.3.group"
+        case "module": return "doc.text"
+        default: return "circle.fill"
+        }
+    }
+
+    private var nodeColor: Color {
+        switch node.type {
+        case "project": return .blue
+        case "group": return .purple
+        case "layer": return .teal
+        case "module": return .orange
+        default: return .secondary
+        }
+    }
+
+    private var labelFont: Font {
+        switch node.type {
+        case "project": return .subheadline.weight(.bold)
+        case "group": return .subheadline.weight(.semibold)
+        case "layer": return .caption.weight(.semibold)
+        case "module": return .caption
+        default: return .caption
+        }
+    }
+
+    private var cardBackground: Color {
+        switch node.type {
+        case "project": return Color.blue.opacity(0.08)
+        case "group": return Color.purple.opacity(0.06)
+        case "layer": return Color.teal.opacity(0.06)
+        case "module": return Color(.secondarySystemGroupedBackground)
+        default: return Color(.secondarySystemGroupedBackground)
+        }
+    }
+}
+
+/// Detail sheet shown when tapping a leaf node
+private struct ArchNodeDetailSheet: View {
+    let node: ArchNode
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Type badge
+                    HStack {
+                        Text(node.type.uppercased())
+                            .font(.caption2.weight(.bold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(badgeColor.opacity(0.15), in: Capsule())
+                            .foregroundStyle(badgeColor)
+
+                        Spacer()
+                    }
+
+                    // Description
+                    if !node.desc.isEmpty {
+                        Text(node.desc)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    // Children list
+                    if !node.children.isEmpty {
+                        Divider()
+                        Text("Contains")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+
+                        ForEach(node.children) { child in
+                            HStack(alignment: .top, spacing: 8) {
+                                Circle()
+                                    .fill(childColor(child))
+                                    .frame(width: 6, height: 6)
+                                    .padding(.top, 5)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(child.label)
+                                        .font(.caption.weight(.medium))
+                                    if !child.desc.isEmpty {
+                                        Text(child.desc)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(3)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle(node.label)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var badgeColor: Color {
+        switch node.type {
+        case "project": return .blue
+        case "group": return .purple
+        case "layer": return .teal
+        case "module": return .orange
+        default: return .secondary
+        }
+    }
+
+    private func childColor(_ child: ArchNode) -> Color {
+        switch child.type {
+        case "layer": return .teal
+        case "module": return .orange
+        default: return .secondary
+        }
+    }
+}
+
+// MARK: - File Browser
+
+private struct FileBrowserView: View {
+    @ObservedObject var model: AppModel
+    let projectPath: String
+    let rel: String
+
+    @State private var entries: [FileEntry] = []
+    @State private var isLoading = true
+    @State private var errorMessage: String?
+
+    private var title: String {
+        if rel.isEmpty { return "Files" }
+        return (rel as NSString).lastPathComponent
+    }
+
+    var body: some View {
+        Group {
+            if isLoading {
+                ProgressView("Loading…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let error = errorMessage {
+                ContentUnavailableView {
+                    Label("Error", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(error)
+                }
+            } else if entries.isEmpty {
+                ContentUnavailableView {
+                    Label("Empty", systemImage: "folder")
+                } description: {
+                    Text("No files in this directory.")
+                }
+            } else {
+                List(entries) { entry in
+                    if entry.isDir {
+                        NavigationLink {
+                            FileBrowserView(model: model, projectPath: projectPath, rel: entry.relPath)
+                        } label: {
+                            fileRow(entry)
+                        }
+                    } else {
+                        NavigationLink {
+                            FileContentView(model: model, projectPath: projectPath, rel: entry.relPath)
+                        } label: {
+                            fileRow(entry)
+                        }
+                    }
+                }
+                .listStyle(.plain)
+            }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await loadFiles()
+        }
+    }
+
+    @ViewBuilder
+    private func fileRow(_ entry: FileEntry) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: entry.isDir ? "folder.fill" : fileIcon(for: entry.name))
+                .foregroundStyle(entry.isDir ? Color.accentColor : Color.secondary)
+                .frame(width: 20)
+            Text(entry.name)
+                .font(.subheadline)
+                .lineLimit(1)
+            Spacer()
+            if !entry.isDir, let size = entry.size {
+                Text(formatSize(size))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private func loadFiles() async {
+        guard let client = makeClient() else {
+            errorMessage = "Not connected"
+            isLoading = false
+            return
+        }
+        do {
+            let result = try await client.fetchFiles(projectPath: projectPath, rel: rel)
+            entries = result.entries
+            if let err = result.error {
+                errorMessage = err
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        isLoading = false
+    }
+
+    private func makeClient() -> APIClient? {
+        guard let url = URL(string: model.serverURLString) else { return nil }
+        return APIClient(baseURL: url, token: model.apiToken)
+    }
+
+    private func fileIcon(for name: String) -> String {
+        let ext = (name as NSString).pathExtension.lowercased()
+        switch ext {
+        case "swift", "py", "js", "ts", "rb", "go", "rs", "java", "kt", "c", "cpp", "h", "m":
+            return "doc.text"
+        case "json", "yaml", "yml", "toml", "xml", "plist":
+            return "doc.badge.gearshape"
+        case "md", "txt", "rst":
+            return "doc.plaintext"
+        case "png", "jpg", "jpeg", "gif", "svg", "webp", "ico":
+            return "photo"
+        case "xcodeproj", "xcworkspace":
+            return "hammer"
+        default:
+            return "doc"
+        }
+    }
+
+    private func formatSize(_ bytes: Int) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        if bytes < 1024 * 1024 { return "\(bytes / 1024) KB" }
+        return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
+    }
+}
+
+// MARK: - File Content View
+
+private struct FileContentView: View {
+    @ObservedObject var model: AppModel
+    let projectPath: String
+    let rel: String
+
+    @State private var content: String?
+    @State private var isBinary = false
+    @State private var isLoading = true
+    @State private var errorMessage: String?
+    @State private var fileSize: Int?
+
+    private var fileName: String {
+        (rel as NSString).lastPathComponent
+    }
+
+    var body: some View {
+        Group {
+            if isLoading {
+                ProgressView("Loading…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if isBinary {
+                ContentUnavailableView {
+                    Label("Binary File", systemImage: "doc.zipper")
+                } description: {
+                    Text("\(fileName) (\(formatSize(fileSize ?? 0)))\nBinary files cannot be displayed.")
+                }
+            } else if let error = errorMessage {
+                ContentUnavailableView {
+                    Label("Error", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(error)
+                }
+            } else if let content {
+                ScrollView(.horizontal) {
+                    ScrollView(.vertical) {
+                        Text(content)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .padding()
+                    }
+                }
+            }
+        }
+        .navigationTitle(fileName)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let size = fileSize {
+                ToolbarItem(placement: .status) {
+                    Text(formatSize(size))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .task {
+            await loadContent()
+        }
+    }
+
+    private func loadContent() async {
+        guard let url = URL(string: model.serverURLString) else {
+            errorMessage = "Not connected"
+            isLoading = false
+            return
+        }
+        let client = APIClient(baseURL: url, token: model.apiToken)
+        do {
+            let result = try await client.fetchFileContent(projectPath: projectPath, rel: rel)
+            fileSize = result.size
+            if result.binary == true {
+                isBinary = true
+            } else {
+                content = result.content
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        isLoading = false
+    }
+
+    private func formatSize(_ bytes: Int) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        if bytes < 1024 * 1024 { return "\(bytes / 1024) KB" }
+        return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
     }
 }
 
@@ -824,6 +1554,40 @@ private struct SettingsSheet: View {
                     }
                 }
 
+                // MARK: Agents
+                Section {
+                    if model.isCheckingAgents {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Checking agents…")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if model.agentStatuses.isEmpty {
+                        Button {
+                            Task { await model.fetchAgentStatuses() }
+                        } label: {
+                            Label("Check Agent Status", systemImage: "arrow.clockwise")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(!model.isOnline)
+                    } else {
+                        ForEach(model.agentStatuses) { agent in
+                            AgentStatusRow(agent: agent)
+                        }
+                        Button {
+                            Task { await model.fetchAgentStatuses() }
+                        } label: {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                                .font(.subheadline)
+                        }
+                    }
+                } header: {
+                    Label("Agents", systemImage: "cpu")
+                } footer: {
+                    Text("Agents installed on the server that can execute tasks.")
+                }
+
                 if model.pendingOperationCount > 0 {
                     Section("Pending Sync") {
                         HStack {
@@ -855,8 +1619,99 @@ private struct SettingsSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .task {
+                if model.isOnline && model.agentStatuses.isEmpty {
+                    await model.fetchAgentStatuses()
+                }
+            }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+private struct AgentStatusRow: View {
+    let agent: AgentStatusModel
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Icon
+            Image(systemName: iconName)
+                .font(.title3)
+                .foregroundStyle(iconColor)
+                .frame(width: 28)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(agent.displayName)
+                        .font(.subheadline.weight(.medium))
+                    if let version = agent.version {
+                        Text(version)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
+
+                if agent.available {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(authColor)
+                            .frame(width: 5, height: 5)
+                        Text(authLabel)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let error = agent.error {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer()
+
+            // Status badge
+            Text(agent.available ? "Online" : "Offline")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(agent.available ? .green : .secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    (agent.available ? Color.green : Color.secondary).opacity(0.12),
+                    in: Capsule()
+                )
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var iconName: String {
+        switch agent.name {
+        case "claude": return "brain"
+        case "codex": return "chevron.left.forwardslash.chevron.right"
+        case "command": return "terminal"
+        default: return "cpu"
+        }
+    }
+
+    private var iconColor: Color {
+        agent.available ? .accentColor : .secondary
+    }
+
+    private var authColor: Color {
+        switch agent.authStatus {
+        case "authenticated": return .green
+        case "needs_login": return .orange
+        default: return .secondary
+        }
+    }
+
+    private var authLabel: String {
+        switch agent.authStatus {
+        case "authenticated": return "Authenticated"
+        case "needs_login": return "Needs login"
+        default: return "Auth unknown"
+        }
     }
 }
 
@@ -1437,15 +2292,13 @@ private struct TopicDetailView: View {
     // MARK: Documents
 
     private var documentsSection: some View {
-        let docs: [(key: String, title: String, icon: String)] = [
-            ("topic.md", "Overview", "doc.text"),
-            ("requirement.md", "Requirement", "checklist"),
-            ("plan.md", "Plan", "map"),
-            ("notes.md", "Notes", "note.text"),
-        ]
-
-        return VStack(spacing: 12) {
-            ForEach(docs, id: \.key) { doc in
+        VStack(spacing: 12) {
+            ForEach([
+                (key: "topic.md", title: "Overview", icon: "doc.text"),
+                (key: "requirement.md", title: "Requirement", icon: "checklist"),
+                (key: "plan.md", title: "Plan", icon: "map"),
+                (key: "notes.md", title: "Notes", icon: "note.text"),
+            ], id: \.key) { doc in
                 let content = detail.documents[doc.key] ?? ""
                 if !content.isEmpty {
                     DocumentSection(title: doc.title, icon: doc.icon, bodyText: content)

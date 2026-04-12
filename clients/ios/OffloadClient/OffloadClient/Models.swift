@@ -169,6 +169,107 @@ struct InitLogResponse: Codable {
     let status: String
 }
 
+struct ProjectActivityResponse: Codable {
+    let meta: ProjectMeta
+    let recentRuns: [RecentRun]
+    let recentCommits: [RecentCommit]
+}
+
+struct ProjectMeta: Codable {
+    let name: String
+    let path: String
+    let summary: String?
+    let topicStats: TopicStats
+    let architectureExcerpt: String?
+}
+
+struct TopicStats: Codable {
+    let total: Int
+    let active: Int
+    let completed: Int
+    let archived: Int
+}
+
+struct RecentRun: Codable, Identifiable {
+    let topicId: String
+    let topicTitle: String
+    let runId: String
+    let executor: String
+    let status: String
+    let finishedAt: String?
+    let summary: String
+    let reportExcerpt: String?
+
+    var id: String { runId }
+}
+
+struct RecentCommit: Codable, Identifiable {
+    let hash: String
+    let message: String
+    let date: String
+    let author: String
+
+    var id: String { hash }
+}
+
+struct ArchNode: Codable, Identifiable {
+    let id: String
+    let label: String
+    let type: String   // "project", "group", "layer", "module"
+    let desc: String
+    let children: [ArchNode]
+}
+
+struct ArchTreeResponse: Codable {
+    let tree: ArchNode
+}
+
+struct FileEntry: Codable, Identifiable {
+    let name: String
+    let relPath: String
+    let isDir: Bool
+    let size: Int?
+
+    var id: String { relPath }
+}
+
+struct FileListResponse: Codable {
+    let entries: [FileEntry]
+    let rel: String
+    let error: String?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        entries = try container.decode([FileEntry].self, forKey: .entries)
+        rel = try container.decode(String.self, forKey: .rel)
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+    }
+}
+
+struct FileContentResponse: Codable {
+    let rel: String
+    let content: String?
+    let truncated: Bool?
+    let binary: Bool?
+    let size: Int?
+}
+
+struct AgentStatusModel: Codable, Identifiable {
+    let name: String
+    let displayName: String
+    let available: Bool
+    let version: String?
+    let error: String?
+    let authStatus: String?  // "authenticated", "needs_login", "unknown"
+    let detail: String?
+
+    var id: String { name }
+}
+
+struct AgentStatusResponse: Codable {
+    let agents: [AgentStatusModel]
+}
+
 struct TopicCreateRequest: Codable {
     let title: String
     let rawInput: String

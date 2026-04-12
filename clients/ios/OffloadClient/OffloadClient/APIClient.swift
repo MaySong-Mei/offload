@@ -48,6 +48,32 @@ struct APIClient {
         return try await send("/projects/readme?path=\(encoded)", response: ReadmeResponse.self).content
     }
 
+    func fetchProjectActivity(projectPath: String) async throws -> ProjectActivityResponse {
+        let encoded = projectPath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? projectPath
+        return try await send("/projects/activity?path=\(encoded)", response: ProjectActivityResponse.self)
+    }
+
+    func fetchArchitectureTree(projectPath: String) async throws -> ArchNode {
+        let encoded = projectPath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? projectPath
+        return try await send("/projects/architecture?path=\(encoded)", response: ArchTreeResponse.self).tree
+    }
+
+    func fetchFiles(projectPath: String, rel: String = "") async throws -> FileListResponse {
+        let encodedPath = projectPath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? projectPath
+        let encodedRel = rel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? rel
+        return try await send("/projects/files?path=\(encodedPath)&rel=\(encodedRel)", response: FileListResponse.self)
+    }
+
+    func fetchFileContent(projectPath: String, rel: String) async throws -> FileContentResponse {
+        let encodedPath = projectPath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? projectPath
+        let encodedRel = rel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? rel
+        return try await send("/projects/file-content?path=\(encodedPath)&rel=\(encodedRel)", response: FileContentResponse.self)
+    }
+
+    func fetchAgentStatus() async throws -> [AgentStatusModel] {
+        try await send("/agents/status", response: AgentStatusResponse.self).agents
+    }
+
     func fetchInitLog(projectPath: String) async throws -> InitLogResponse {
         let encoded = projectPath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? projectPath
         return try await send("/projects/init-log?path=\(encoded)", response: InitLogResponse.self)
