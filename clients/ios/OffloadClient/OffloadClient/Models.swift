@@ -62,7 +62,7 @@ struct FeedbackRequestModel: Codable, Identifiable, Hashable {
     let createdAt: String
     let resolvedAt: String?
     let allowNote: Bool
-    let metadata: [String: String]
+    let metadata: [String: AnyCodable]
 
     var id: String { requestId }
 }
