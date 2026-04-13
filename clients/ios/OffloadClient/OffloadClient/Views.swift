@@ -606,24 +606,43 @@ private struct ProjectDashboardView: View {
     // MARK: Section 3 — Pipeline
 
     private var pipelineSection: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(pipelineCounts.filter { $0.count > 0 }, id: \.state) { item in
-                    VStack(spacing: 3) {
-                        Text("\(item.count)")
-                            .font(.title3.weight(.bold))
-                            .foregroundStyle(item.color)
-                        Text(item.label)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+        let active = pipelineCounts.filter { $0.count > 0 }
+        return Group {
+            if active.isEmpty {
+                HStack {
+                    Spacer()
+                    VStack(spacing: 4) {
+                        Image(systemName: "arrow.right.arrow.left")
+                            .font(.title3)
+                            .foregroundStyle(.quaternary)
+                        Text("No topics in pipeline yet")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
                     }
-                    .frame(minWidth: 50)
                     .padding(.vertical, 8)
-                    .padding(.horizontal, 4)
-                    .background(item.color.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                    Spacer()
+                }
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(active, id: \.state) { item in
+                            VStack(spacing: 3) {
+                                Text("\(item.count)")
+                                    .font(.title3.weight(.bold))
+                                    .foregroundStyle(item.color)
+                                Text(item.label)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(minWidth: 50)
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 4)
+                            .background(item.color.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                    .padding(.vertical, 4)
                 }
             }
-            .padding(.vertical, 4)
         }
     }
 
