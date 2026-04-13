@@ -34,11 +34,7 @@ class HarnessHTTPServer(ThreadingHTTPServer):
     def server_bind(self):
         import socket as _socket
         self.socket.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-        try:
-            self.socket.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEPORT, 1)
-        except (AttributeError, OSError):
-            pass
-        _socket.socket.bind(self.socket, self.server_address)
+        self.socket.bind(self.server_address)
         self.server_address = self.socket.getsockname()
 
     def __init__(self, server_address, RequestHandlerClass, service: HarnessService, auth: AuthConfig, scanner: Optional[ProjectScanner] = None, init_runner: Optional[InitRunner] = None, tunnel_manager=None):
@@ -59,6 +55,7 @@ def create_http_server(host: str, port: int, service: HarnessService, scanner: O
 def make_handler():
     class Handler(BaseHTTPRequestHandler):
         server: HarnessHTTPServer
+        protocol_version = "HTTP/1.1"  # Enable keep-alive
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)

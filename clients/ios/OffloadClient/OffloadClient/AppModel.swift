@@ -195,6 +195,7 @@ final class AppModel: ObservableObject {
             log.info("reload: success")
         } catch {
             log.error("reload: failed - \(error.localizedDescription, privacy: .public)")
+            print("[reload] FAILED: \(error)")
             await loadFromCache()
             if topics.isEmpty {
                 errorMessage = error.localizedDescription
