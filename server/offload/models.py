@@ -263,6 +263,115 @@ class RunRecord:
         )
 
 
+class SensorStatus(StrEnum):
+    BUILDING = "building"       # topic still in progress
+    TESTING = "testing"         # built, running stability checks
+    ACTIVE = "active"           # deployed and collecting
+    PAUSED = "paused"           # manually paused
+    FAILED = "failed"           # collection is failing
+
+
+class SignalSeverity(StrEnum):
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
+@dataclass
+class SensorRecord:
+    sensor_id: str
+    project: str
+    name: str
+    description: str = ""
+    status: SensorStatus = SensorStatus.BUILDING
+    schedule: str = "*/30 * * * *"
+    source_topic_id: Optional[str] = None
+    sensor_path: str = ""               # path to .offload/sensors/<name>/
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+    last_run_at: Optional[str] = None
+    last_error: Optional[str] = None
+    consecutive_failures: int = 0
+
+    def to_json_dict(self) -> Dict[str, Any]:
+        return {
+            "sensor_id": self.sensor_id,
+            "project": self.project,
+            "name": self.name,
+            "description": self.description,
+            "status": self.status.value,
+            "schedule": self.schedule,
+            "source_topic_id": self.source_topic_id,
+            "sensor_path": self.sensor_path,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "last_run_at": self.last_run_at,
+            "last_error": self.last_error,
+            "consecutive_failures": self.consecutive_failures,
+        }
+
+    @classmethod
+    def from_json_dict(cls, payload: Dict[str, Any]) -> "SensorRecord":
+        return cls(
+            sensor_id=payload["sensor_id"],
+            project=payload["project"],
+            name=payload["name"],
+            description=payload.get("description", ""),
+            status=SensorStatus(payload.get("status", SensorStatus.BUILDING.value)),
+            schedule=payload.get("schedule", "*/30 * * * *"),
+            source_topic_id=payload.get("source_topic_id"),
+            sensor_path=payload.get("sensor_path", ""),
+            created_at=payload.get("created_at", utc_now()),
+            updated_at=payload.get("updated_at", utc_now()),
+            last_run_at=payload.get("last_run_at"),
+            last_error=payload.get("last_error"),
+            consecutive_failures=payload.get("consecutive_failures", 0),
+        )
+
+
+@dataclass
+class Signal:
+    signal_id: str
+    sensor_id: str
+    project: str
+    severity: SignalSeverity = SignalSeverity.INFO
+    title: str = ""
+    detail: str = ""
+    count: int = 1
+    source: str = ""
+    created_at: str = field(default_factory=utc_now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_json_dict(self) -> Dict[str, Any]:
+        return {
+            "signal_id": self.signal_id,
+            "sensor_id": self.sensor_id,
+            "project": self.project,
+            "severity": self.severity.value,
+            "title": self.title,
+            "detail": self.detail,
+            "count": self.count,
+            "source": self.source,
+            "created_at": self.created_at,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_json_dict(cls, payload: Dict[str, Any]) -> "Signal":
+        return cls(
+            signal_id=payload["signal_id"],
+            sensor_id=payload["sensor_id"],
+            project=payload["project"],
+            severity=SignalSeverity(payload.get("severity", SignalSeverity.INFO.value)),
+            title=payload.get("title", ""),
+            detail=payload.get("detail", ""),
+            count=payload.get("count", 1),
+            source=payload.get("source", ""),
+            created_at=payload.get("created_at", utc_now()),
+            metadata=dict(payload.get("metadata", {})),
+        )
+
+
 @dataclass
 class EventRecord:
     event_id: str

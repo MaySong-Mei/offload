@@ -53,6 +53,26 @@ struct APIClient {
         return try await send("/projects/activity?path=\(encoded)", response: ProjectActivityResponse.self)
     }
 
+    func fetchSensors(project: String) async throws -> [SensorModel] {
+        let encoded = project.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? project
+        return try await send("/sensors?project=\(encoded)", response: SensorListResponse.self).sensors
+    }
+
+    func fetchSignals(project: String, limit: Int = 30) async throws -> [SignalModel] {
+        let encoded = project.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? project
+        return try await send("/signals?project=\(encoded)&limit=\(limit)", response: SignalListResponse.self).signals
+    }
+
+    func constructSensor(project: String, description: String) async throws -> TopicDetailResponse {
+        struct Body: Codable { let project: String; let description: String }
+        return try await send(
+            "/sensors/construct",
+            method: "POST",
+            body: Body(project: project, description: description),
+            response: TopicDetailResponse.self
+        )
+    }
+
     func fetchArchitectureTree(projectPath: String) async throws -> ArchNode {
         let encoded = projectPath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? projectPath
         return try await send("/projects/architecture?path=\(encoded)", response: ArchTreeResponse.self).tree

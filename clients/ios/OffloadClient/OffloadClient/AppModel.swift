@@ -26,6 +26,8 @@ final class AppModel: ObservableObject {
     @Published var projectActivity: ProjectActivityResponse?
     @Published var agentStatuses: [AgentStatusModel] = []
     @Published var isCheckingAgents = false
+    @Published var sensors: [SensorModel] = []
+    @Published var signals: [SignalModel] = []
 
     // Combined list: server-discovered projects + projects referenced by topics + ungrouped slot
     var allProjectGroups: [(key: String, name: String, hasReadme: Bool, topicCount: Int)] {
@@ -488,6 +490,17 @@ final class AppModel: ObservableObject {
             print("[Agents] fetch failed: \(error)")
         }
         isCheckingAgents = false
+    }
+
+    func fetchSensorsAndSignals(projectPath: String) async {
+        guard let client = makeClient() else { return }
+        sensors = (try? await client.fetchSensors(project: projectPath)) ?? []
+        signals = (try? await client.fetchSignals(project: projectPath)) ?? []
+    }
+
+    func constructSensor(project: String, description: String) async -> TopicDetailResponse? {
+        guard let client = makeClient() else { return nil }
+        return try? await client.constructSensor(project: project, description: description)
     }
 
     func fetchReadme(projectPath: String) async -> String? {

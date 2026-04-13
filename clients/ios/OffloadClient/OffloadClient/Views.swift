@@ -302,6 +302,7 @@ private struct ProjectDashboardView: View {
     @ObservedObject var model: AppModel
     @Binding var showingNewTopicSheet: Bool
     @State private var readmeContent: String?
+    @State private var showingNewSensorSheet = false
 
     private var topics: [TopicSummary] {
         model.topicsForSelectedProject()
@@ -411,6 +412,23 @@ private struct ProjectDashboardView: View {
                 }
             }
 
+            // Signals (from sensors)
+            if !model.signals.isEmpty || !model.sensors.isEmpty {
+                Section {
+                    signalsSection
+                } header: {
+                    HStack {
+                        Label("Signals", systemImage: "sensor.fill")
+                        Spacer()
+                        if !model.sensors.isEmpty {
+                            Text("\(model.sensors.count) sensor\(model.sensors.count == 1 ? "" : "s")")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+            }
+
             // Section 1: Action Required
             if actionRequiredCount > 0 {
                 Section {
@@ -485,22 +503,35 @@ private struct ProjectDashboardView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button { showingNewTopicSheet = true } label: {
+                Menu {
+                    Button { showingNewTopicSheet = true } label: {
+                        Label("New Topic", systemImage: "plus")
+                    }
+                    Button { showingNewSensorSheet = true } label: {
+                        Label("Add Sensor", systemImage: "sensor.fill")
+                    }
+                } label: {
                     Image(systemName: "plus.circle.fill")
                 }
             }
+        }
+        .sheet(isPresented: $showingNewSensorSheet) {
+            NewSensorSheet(model: model)
         }
         .task(id: model.selectedProjectKey) {
             model.projectActivity = nil
             await loadReadme()
             if let key = model.selectedProjectKey, !key.isEmpty {
-                await model.fetchActivity(projectPath: key)
+                async let _ = model.fetchActivity(projectPath: key)
+                async let _ = model.fetchSensorsAndSignals(projectPath: key)
             }
         }
         .onAppear {
-            // Re-fetch activity when view reappears (e.g. navigating back on iPhone)
             if let key = model.selectedProjectKey, !key.isEmpty {
-                Task { await model.fetchActivity(projectPath: key) }
+                Task {
+                    await model.fetchActivity(projectPath: key)
+                    await model.fetchSensorsAndSignals(projectPath: key)
+                }
             }
         }
     }
@@ -718,6 +749,168 @@ private struct ProjectDashboardView: View {
             return
         }
         readmeContent = await model.fetchReadme(projectPath: key)
+    }
+
+    // MARK: Signals Section
+
+    @ViewBuilder
+    private var signalsSection: some View {
+        // Show recent signals
+        if model.signals.isEmpty {
+            ForEach(model.sensors) { sensor in
+                SensorRow(sensor: sensor)
+            }
+        } else {
+            ForEach(model.signals.prefix(5)) { signal in
+                SignalRow(signal: signal)
+            }
+            // Show sensor health below signals
+            ForEach(model.sensors) { sensor in
+                SensorRow(sensor: sensor)
+            }
+        }
+    }
+}
+
+// MARK: - Signal Row
+
+private struct SignalRow: View {
+    let signal: SignalModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(severityColor)
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(signal.title)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                if !signal.detail.isEmpty {
+                    Text(signal.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer()
+            if signal.count > 1 {
+                Text("\u{00D7}\(signal.count)")
+                    .font(.caption.weight(.semibold).monospaced())
+                    .foregroundStyle(severityColor)
+            }
+        }
+    }
+
+    private var severityColor: Color {
+        switch signal.severity {
+        case "critical": return .red
+        case "warning": return .orange
+        default: return .blue
+        }
+    }
+}
+
+// MARK: - Sensor Row
+
+private struct SensorRow: View {
+    let sensor: SensorModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: statusIcon)
+                .font(.caption)
+                .foregroundStyle(statusColor)
+                .frame(width: 16)
+            Text(sensor.name)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(sensor.status)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(statusColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(statusColor.opacity(0.12), in: Capsule())
+        }
+    }
+
+    private var statusIcon: String {
+        switch sensor.status {
+        case "active": return "antenna.radiowaves.left.and.right"
+        case "building": return "hammer"
+        case "testing": return "checkmark.circle.badge.questionmark"
+        case "paused": return "pause.circle"
+        case "failed": return "exclamationmark.triangle"
+        default: return "sensor.fill"
+        }
+    }
+
+    private var statusColor: Color {
+        switch sensor.status {
+        case "active": return .green
+        case "building": return .blue
+        case "testing": return .orange
+        case "failed": return .red
+        case "paused": return .secondary
+        default: return .secondary
+        }
+    }
+}
+
+// MARK: - New Sensor Sheet
+
+private struct NewSensorSheet: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var description = ""
+    @State private var isSubmitting = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("What do you want to observe?", text: $description, axis: .vertical)
+                        .lineLimit(3...8)
+                } header: {
+                    Text("Describe the sensor")
+                } footer: {
+                    Text("Examples: \"Monitor crash reports from Sentry\", \"Watch for new GitHub issues with bug label\", \"Check API response time every 5 minutes\"")
+                }
+            }
+            .navigationTitle("Add Sensor")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        Task { await submit() }
+                    } label: {
+                        if isSubmitting {
+                            ProgressView()
+                        } else {
+                            Text("Create")
+                        }
+                    }
+                    .disabled(description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSubmitting)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    private func submit() async {
+        guard let key = model.selectedProjectKey, !key.isEmpty else { return }
+        isSubmitting = true
+        if let detail = await model.constructSensor(project: key, description: description) {
+            // Select the newly created topic so user sees it
+            model.selectedTopicID = detail.topic.topicId
+            model.selectedTopicDetail = detail
+        }
+        isSubmitting = false
+        dismiss()
     }
 }
 

@@ -212,6 +212,44 @@ struct RecentCommit: Codable, Identifiable {
     var id: String { hash }
 }
 
+struct SensorModel: Codable, Identifiable {
+    let sensorId: String
+    let project: String
+    let name: String
+    let description: String
+    let status: String       // building, testing, active, paused, failed
+    let schedule: String
+    let sourceTopicId: String?
+    let createdAt: String
+    let lastRunAt: String?
+    let lastError: String?
+    let consecutiveFailures: Int
+
+    var id: String { sensorId }
+}
+
+struct SignalModel: Codable, Identifiable {
+    let signalId: String
+    let sensorId: String
+    let project: String
+    let severity: String     // info, warning, critical
+    let title: String
+    let detail: String
+    let count: Int
+    let source: String
+    let createdAt: String
+
+    var id: String { signalId }
+}
+
+struct SensorListResponse: Codable {
+    let sensors: [SensorModel]
+}
+
+struct SignalListResponse: Codable {
+    let signals: [SignalModel]
+}
+
 struct ArchNode: Codable, Identifiable {
     let id: String
     let label: String

@@ -24,6 +24,7 @@ from .models import (
     utc_now,
 )
 from .planner import TopicPlanner
+from .sensor_runner import SensorRunner
 from .workspace import WorkspaceManager
 
 
@@ -48,9 +49,16 @@ class HarnessService:
         self._lock = threading.RLock()
         self._run_threads: Dict[str, threading.Thread] = {}
         self._project_paths = project_paths or []
+        self.sensor_runner = SensorRunner(self.store, self.event_bus, self._project_paths)
         self.reindex()
 
+    def start_sensors(self) -> None:
+        """Start the sensor background scheduler. Call after server is ready."""
+        self.sensor_runner.scan_and_register()
+        self.sensor_runner.start()
+
     def close(self) -> None:
+        self.sensor_runner.stop()
         threads = []
         with self._lock:
             threads = list(self._run_threads.values())

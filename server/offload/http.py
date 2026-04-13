@@ -31,18 +31,19 @@ class AuthConfig:
 class HarnessHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
-    def __init__(self, server_address, RequestHandlerClass, service: HarnessService, auth: AuthConfig, scanner: Optional[ProjectScanner] = None, init_runner: Optional[InitRunner] = None):
+    def __init__(self, server_address, RequestHandlerClass, service: HarnessService, auth: AuthConfig, scanner: Optional[ProjectScanner] = None, init_runner: Optional[InitRunner] = None, tunnel_manager=None):
         super().__init__(server_address, RequestHandlerClass)
         self.service = service
         self.auth = auth
         self.scanner = scanner or ProjectScanner(None)
         self.init_runner = init_runner or InitRunner()
+        self.tunnel_manager = tunnel_manager
 
 
-def create_http_server(host: str, port: int, service: HarnessService, scanner: Optional[ProjectScanner] = None, init_runner: Optional[InitRunner] = None, auth_token: Optional[str] = None) -> HarnessHTTPServer:
+def create_http_server(host: str, port: int, service: HarnessService, scanner: Optional[ProjectScanner] = None, init_runner: Optional[InitRunner] = None, auth_token: Optional[str] = None, tunnel_manager=None) -> HarnessHTTPServer:
     auth = AuthConfig(auth_token)
     handler = make_handler()
-    return HarnessHTTPServer((host, port), handler, service, auth, scanner=scanner, init_runner=init_runner)
+    return HarnessHTTPServer((host, port), handler, service, auth, scanner=scanner, init_runner=init_runner, tunnel_manager=tunnel_manager)
 
 
 def make_handler():
@@ -128,6 +129,30 @@ def make_handler():
                     return
                 self._write_json(HTTPStatus.OK, result)
                 return
+            if parsed.path == "/sensors":
+                query = parse_qs(parsed.query)
+                project = query.get("project", [None])[0]
+                self._write_json(HTTPStatus.OK, {
+                    "sensors": self.server.service.sensor_runner.list_sensors(project),
+                })
+                return
+            if parsed.path == "/signals":
+                query = parse_qs(parsed.query)
+                project = query.get("project", [None])[0]
+                sensor_id = query.get("sensor_id", [None])[0]
+                limit = int(query.get("limit", ["50"])[0])
+                self._write_json(HTTPStatus.OK, {
+                    "signals": self.server.service.sensor_runner.list_signals(project, sensor_id, limit),
+                })
+                return
+            if parsed.path == "/remote":
+                tunnels = self.server.tunnel_manager.get_all_tunnels() if self.server.tunnel_manager else []
+                active = self.server.tunnel_manager.get_active_tunnel() if self.server.tunnel_manager else None
+                self._write_json(HTTPStatus.OK, {
+                    "tunnels": tunnels,
+                    "active": active.to_dict() if active else None,
+                })
+                return
             if parsed.path == "/agents/status":
                 agents = []
                 for executor in self.server.service.executors.values():
@@ -158,6 +183,31 @@ def make_handler():
             parsed = urlparse(self.path)
             payload = self._read_json_body()
             try:
+                if parsed.path == "/sensors/construct":
+                    # Create a topic that builds a sensor
+                    project = payload.get("project", "")
+                    description = payload.get("description", "")
+                    if not project or not description:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'project' or 'description'"})
+                        return
+                    detail = self.server.service.create_topic(
+                        title=f"Build sensor: {description[:60]}",
+                        raw_input=description,
+                        tags=["sensor", "infrastructure"],
+                        project=project,
+                    )
+                    self._write_json(HTTPStatus.CREATED, detail)
+                    return
+                if parsed.path == "/sensors/ingest":
+                    # Webhook-style signal ingestion
+                    sensor_id = payload.get("sensor_id", "")
+                    signals = payload.get("signals", [])
+                    if not sensor_id or not signals:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'sensor_id' or 'signals'"})
+                        return
+                    count = self.server.service.sensor_runner.ingest_signals(sensor_id, signals)
+                    self._write_json(HTTPStatus.OK, {"ingested": count})
+                    return
                 if parsed.path == "/projects/cancel-init":
                     project_path = payload.get("path", "")
                     if not project_path:

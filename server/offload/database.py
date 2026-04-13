@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import List, Optional
 
-from .models import EventRecord, FeedbackRequest, FeedbackResponse, RunRecord, TopicState
+from .models import EventRecord, FeedbackRequest, FeedbackResponse, RunRecord, SensorRecord, Signal, TopicState
 
 
 class IndexStore:
@@ -93,10 +93,42 @@ class IndexStore:
                 payload_json TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS sensors (
+                sensor_id TEXT PRIMARY KEY,
+                project TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'building',
+                schedule TEXT NOT NULL DEFAULT '*/30 * * * *',
+                source_topic_id TEXT,
+                sensor_path TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_run_at TEXT,
+                last_error TEXT,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS signals (
+                signal_id TEXT PRIMARY KEY,
+                sensor_id TEXT NOT NULL,
+                project TEXT NOT NULL,
+                severity TEXT NOT NULL DEFAULT 'info',
+                title TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT '',
+                count INTEGER NOT NULL DEFAULT 1,
+                source TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+
             CREATE INDEX IF NOT EXISTS idx_topics_updated ON topics(updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_topics_parent ON topics(parent_topic_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_feedback_requests_topic ON feedback_requests(topic_id, status);
             CREATE INDEX IF NOT EXISTS idx_runs_topic ON runs(topic_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_sensors_project ON sensors(project, status);
+            CREATE INDEX IF NOT EXISTS idx_signals_sensor ON signals(sensor_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_signals_project ON signals(project, created_at DESC);
             """
         )
         self._ensure_column("topics", "parent_topic_id", "TEXT")
@@ -375,6 +407,88 @@ class IndexStore:
         event.sequence = cursor.lastrowid
         self.connection.commit()
         return event
+
+    # --- Sensors ---
+
+    def upsert_sensor(self, sensor: SensorRecord) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO sensors (
+                sensor_id, project, name, description, status, schedule,
+                source_topic_id, sensor_path, created_at, updated_at,
+                last_run_at, last_error, consecutive_failures
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(sensor_id) DO UPDATE SET
+                name=excluded.name, description=excluded.description,
+                status=excluded.status, schedule=excluded.schedule,
+                sensor_path=excluded.sensor_path, updated_at=excluded.updated_at,
+                last_run_at=excluded.last_run_at, last_error=excluded.last_error,
+                consecutive_failures=excluded.consecutive_failures
+            """,
+            (
+                sensor.sensor_id, sensor.project, sensor.name, sensor.description,
+                sensor.status.value, sensor.schedule, sensor.source_topic_id,
+                sensor.sensor_path, sensor.created_at, sensor.updated_at,
+                sensor.last_run_at, sensor.last_error, sensor.consecutive_failures,
+            ),
+        )
+        self.connection.commit()
+
+    def get_sensor(self, sensor_id: str) -> Optional[SensorRecord]:
+        row = self.connection.execute("SELECT * FROM sensors WHERE sensor_id = ?", (sensor_id,)).fetchone()
+        if row is None:
+            return None
+        return SensorRecord.from_json_dict(dict(row))
+
+    def list_sensors(self, project: Optional[str] = None) -> List[SensorRecord]:
+        if project:
+            rows = self.connection.execute(
+                "SELECT * FROM sensors WHERE project = ? ORDER BY created_at DESC", (project,)
+            ).fetchall()
+        else:
+            rows = self.connection.execute("SELECT * FROM sensors ORDER BY created_at DESC").fetchall()
+        return [SensorRecord.from_json_dict(dict(r)) for r in rows]
+
+    def insert_signal(self, signal: Signal) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO signals (
+                signal_id, sensor_id, project, severity, title, detail,
+                count, source, created_at, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal.signal_id, signal.sensor_id, signal.project,
+                signal.severity.value, signal.title, signal.detail,
+                signal.count, signal.source, signal.created_at,
+                json.dumps(signal.metadata),
+            ),
+        )
+        self.connection.commit()
+
+    def list_signals(self, project: Optional[str] = None, sensor_id: Optional[str] = None, limit: int = 50) -> List[Signal]:
+        query = "SELECT * FROM signals"
+        clauses, params = [], []
+        if project:
+            clauses.append("project = ?")
+            params.append(project)
+        if sensor_id:
+            clauses.append("sensor_id = ?")
+            params.append(sensor_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.connection.execute(query, params).fetchall()
+        return [
+            Signal.from_json_dict({
+                **dict(r),
+                "metadata": json.loads(r["metadata_json"]),
+            })
+            for r in rows
+        ]
+
+    # --- Events ---
 
     def list_events(self, after_sequence: int = 0, limit: int = 200) -> List[EventRecord]:
         rows = self.connection.execute(
