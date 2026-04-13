@@ -31,6 +31,16 @@ class AuthConfig:
 class HarnessHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
+    def server_bind(self):
+        import socket as _socket
+        self.socket.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        try:
+            self.socket.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
+        _socket.socket.bind(self.socket, self.server_address)
+        self.server_address = self.socket.getsockname()
+
     def __init__(self, server_address, RequestHandlerClass, service: HarnessService, auth: AuthConfig, scanner: Optional[ProjectScanner] = None, init_runner: Optional[InitRunner] = None, tunnel_manager=None):
         super().__init__(server_address, RequestHandlerClass)
         self.service = service

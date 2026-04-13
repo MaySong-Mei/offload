@@ -24,6 +24,7 @@ from .models import (
     utc_now,
 )
 from .planner import TopicPlanner
+from .repo_offload import RepoOffload
 from .sensor_runner import SensorRunner
 from .workspace import WorkspaceManager
 
@@ -148,26 +149,25 @@ class HarnessService:
                 workspace_path=workspace_path,
             )
             documents = self.planner.initial_documents(state, shared_context=shared_context)
-            initial_request = self.planner.requirement_feedback_request(topic_id)
-            state.pending_feedback_request_id = initial_request.request_id
             proj = state.project
             self.workspace.create_topic(state, documents)
-            self.workspace.save_feedback_request(initial_request, project=proj)
             self.store.upsert_topic(state)
-            self.store.upsert_feedback_request(initial_request)
             topic_event_type = "topic.subtopic_created" if parent_topic_id else "topic.created"
             topic_event = self._record_event(
                 topic_event_type,
                 topic_id=topic_id,
                 payload={"topic": state.to_json_dict(), "parent_topic_id": parent_topic_id},
             )
-            feedback_event = self._record_event(
-                "feedback.requested",
-                topic_id=topic_id,
-                payload={"feedback_request": initial_request.to_json_dict()},
-            )
             self.event_bus.publish(topic_event)
-            self.event_bus.publish(feedback_event)
+
+            # Kick off async agent clarification
+            project_context = self._load_project_context(proj)
+            threading.Thread(
+                target=self._generate_clarification,
+                args=(topic_id, state, project_context),
+                daemon=True,
+            ).start()
+
             return self.get_topic_detail(topic_id)
 
     def list_topics(self) -> List[Dict[str, Any]]:
@@ -354,6 +354,22 @@ class HarnessService:
                 payload={"feedback_response": response.to_json_dict(), "feedback_request": request.to_json_dict()},
             )
             self.event_bus.publish(event)
+
+            # After answering a clarification question, check if all are resolved
+            # and auto-generate the requirement doc
+            if request.metadata.get("stage") == "clarification":
+                all_clarifications = [
+                    r for r in self.store.list_feedback_requests(topic_id=topic_id)
+                    if r.metadata.get("stage") == "clarification"
+                ]
+                all_resolved = all(r.status.value == "resolved" for r in all_clarifications)
+                if all_resolved and all_clarifications:
+                    threading.Thread(
+                        target=self._update_requirement_from_feedback,
+                        args=(topic_id,),
+                        daemon=True,
+                    ).start()
+
             return self.get_topic_detail(topic_id)
 
     # ---- Approval gates ------------------------------------------------------
@@ -366,18 +382,22 @@ class HarnessService:
             state.requirement_state = RequirementState.APPROVED
             state.requirement_approved_at = utc_now()
             state.updated_at = utc_now()
-            self._resolve_pending_requests(topic_id, FeedbackRequestType.CONFIRM_REQUIREMENT, project=proj)
-            next_request = self.planner.plan_feedback_request(topic_id)
-            state.pending_feedback_request_id = next_request.request_id
             state.decision_state = DecisionState.NEEDS_FEEDBACK
-            self.workspace.save_feedback_request(next_request, project=proj)
+            self._resolve_pending_requests(topic_id, FeedbackRequestType.CONFIRM_REQUIREMENT, project=proj)
             self.workspace.append_note(topic_id, "Requirement Approved", f"Approved by {actor} at {state.requirement_approved_at}.", project=proj)
             self.workspace.save_state(state)
-            self.store.upsert_feedback_request(next_request)
             self.store.upsert_topic(state)
             self._publish_topic_updated(state)
-            self._publish_feedback_requested(next_request)
-            return self.get_topic_detail(topic_id)
+
+        # Kick off async plan generation (outside lock — calls Claude)
+        project_context = self._load_project_context(state.project)
+        threading.Thread(
+            target=self._generate_plan,
+            args=(topic_id, project_context),
+            daemon=True,
+        ).start()
+
+        return self.get_topic_detail(topic_id)
 
     def approve_plan(self, topic_id: str, actor: str = "human") -> Dict[str, Any]:
         with self._lock:
@@ -396,6 +416,157 @@ class HarnessService:
             self.store.upsert_topic(state)
             self._publish_topic_updated(state)
             return self.get_topic_detail(topic_id)
+
+    # ---- Async agent-powered clarification & planning -------------------------
+
+    def _load_project_context(self, project: Optional[str]) -> Optional[Dict[str, str]]:
+        """Load .offload/context/*.md for a project."""
+        if not project:
+            return None
+        project_path = Path(project)
+        if not project_path.is_dir():
+            return None
+        repo = RepoOffload(project_path)
+        ctx = repo.read_context()
+        return ctx if ctx else None
+
+    def _generate_clarification(self, topic_id: str, state: TopicState, project_context: Optional[Dict[str, str]]) -> None:
+        """Background thread: call Claude to generate clarifying questions, then publish as feedback requests."""
+        import sys
+        try:
+            questions = self.planner.generate_clarifying_questions(state, project_context)
+            with self._lock:
+                current = self.store.get_topic(topic_id)
+                if current is None:
+                    return
+                proj = current.project
+                first_request_id = None
+                for request in questions:
+                    self.workspace.save_feedback_request(request, project=proj)
+                    self.store.upsert_feedback_request(request)
+                    if first_request_id is None:
+                        first_request_id = request.request_id
+                    self._publish_feedback_requested(request)
+
+                if first_request_id:
+                    current.pending_feedback_request_id = first_request_id
+                    current.updated_at = utc_now()
+                    self.workspace.save_state(current)
+                    self.store.upsert_topic(current)
+                    self._publish_topic_updated(current)
+        except Exception as e:
+            print(f"[Planner] Clarification generation failed for {topic_id}: {e}", file=sys.stderr)
+            # Fallback: create a generic confirmation request
+            with self._lock:
+                current = self.store.get_topic(topic_id)
+                if current is None:
+                    return
+                fallback = self.planner._fallback_requirement_request(topic_id)
+                current.pending_feedback_request_id = fallback.request_id
+                current.updated_at = utc_now()
+                self.workspace.save_feedback_request(fallback, project=current.project)
+                self.store.upsert_feedback_request(fallback)
+                self.workspace.save_state(current)
+                self.store.upsert_topic(current)
+                self._publish_topic_updated(current)
+                self._publish_feedback_requested(fallback)
+
+    def _generate_plan(self, topic_id: str, project_context: Optional[Dict[str, str]]) -> None:
+        """Background thread: after requirement approval, generate plan with Claude."""
+        import sys
+        try:
+            with self._lock:
+                state = self.store.get_topic(topic_id)
+                if state is None:
+                    return
+                proj = state.project
+                documents = self.workspace.load_documents(topic_id, project=proj)
+                requirement_md = documents.get("requirement.md", "")
+
+            # Call Claude outside lock
+            plan_md = self.planner.generate_plan_doc(state, requirement_md, project_context)
+
+            with self._lock:
+                state = self.store.get_topic(topic_id)
+                if state is None:
+                    return
+                proj = state.project
+                if plan_md:
+                    self.workspace.write_document(topic_id, "plan.md", plan_md, project=proj)
+                plan_request = self.planner.plan_feedback_request(topic_id)
+                state.pending_feedback_request_id = plan_request.request_id
+                state.updated_at = utc_now()
+                self.workspace.save_feedback_request(plan_request, project=proj)
+                self.workspace.save_state(state)
+                self.store.upsert_feedback_request(plan_request)
+                self.store.upsert_topic(state)
+                self._publish_topic_updated(state)
+                self._publish_feedback_requested(plan_request)
+        except Exception as e:
+            print(f"[Planner] Plan generation failed for {topic_id}: {e}", file=sys.stderr)
+            # Still create the plan feedback request so user isn't stuck
+            with self._lock:
+                state = self.store.get_topic(topic_id)
+                if state is None:
+                    return
+                plan_request = self.planner.plan_feedback_request(topic_id)
+                state.pending_feedback_request_id = plan_request.request_id
+                state.updated_at = utc_now()
+                self.workspace.save_feedback_request(plan_request, project=state.project)
+                self.workspace.save_state(state)
+                self.store.upsert_feedback_request(plan_request)
+                self.store.upsert_topic(state)
+                self._publish_topic_updated(state)
+                self._publish_feedback_requested(plan_request)
+
+    def _update_requirement_from_feedback(self, topic_id: str) -> None:
+        """After clarifying questions are answered, regenerate requirement.md with Claude."""
+        import sys
+        try:
+            with self._lock:
+                state = self.store.get_topic(topic_id)
+                if state is None:
+                    return
+                proj = state.project
+                # Gather all feedback for this topic
+                all_requests = self.store.list_feedback_requests(topic_id=topic_id)
+                feedback_history = []
+                for req in all_requests:
+                    if req.metadata.get("stage") == "clarification" and req.status.value == "resolved":
+                        # Find the response
+                        responses = [r for r in self.store.list_feedback_responses(topic_id) if r.request_id == req.request_id]
+                        if responses:
+                            resp = responses[0]
+                            feedback_history.append({
+                                "title": req.title,
+                                "prompt": req.prompt,
+                                "selected_options": resp.selected_options,
+                                "note": resp.note,
+                            })
+
+            project_context = self._load_project_context(state.project)
+            requirement_md = self.planner.generate_requirement_doc(state, feedback_history, project_context)
+
+            if requirement_md:
+                with self._lock:
+                    state = self.store.get_topic(topic_id)
+                    if state is None:
+                        return
+                    proj = state.project
+                    self.workspace.write_document(topic_id, "requirement.md", requirement_md, project=proj)
+                    state.requirement_state = RequirementState.SPECIFIED
+                    state.updated_at = utc_now()
+                    # Create requirement confirmation request
+                    confirm_req = self.planner.requirement_feedback_request(topic_id)
+                    state.pending_feedback_request_id = confirm_req.request_id
+                    self.workspace.save_feedback_request(confirm_req, project=proj)
+                    self.workspace.save_state(state)
+                    self.store.upsert_feedback_request(confirm_req)
+                    self.store.upsert_topic(state)
+                    self._publish_topic_updated(state)
+                    self._publish_feedback_requested(confirm_req)
+        except Exception as e:
+            print(f"[Planner] Requirement generation failed for {topic_id}: {e}", file=sys.stderr)
 
     # ---- Testing / Archive ---------------------------------------------------
 

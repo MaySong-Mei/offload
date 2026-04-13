@@ -327,6 +327,24 @@ class IndexStore:
         )
         self.connection.commit()
 
+    def list_feedback_responses(self, topic_id: str) -> List[FeedbackResponse]:
+        rows = self.connection.execute(
+            "SELECT * FROM feedback_responses WHERE topic_id = ? ORDER BY created_at ASC",
+            (topic_id,),
+        ).fetchall()
+        return [
+            FeedbackResponse.from_json_dict({
+                "response_id": r["response_id"],
+                "request_id": r["request_id"],
+                "topic_id": r["topic_id"],
+                "selected_options": json.loads(r["selected_options_json"]),
+                "note": r["note"],
+                "actor": r["actor"],
+                "created_at": r["created_at"],
+            })
+            for r in rows
+        ]
+
     def upsert_run(self, run: RunRecord) -> None:
         self.connection.execute(
             """

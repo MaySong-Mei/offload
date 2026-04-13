@@ -221,6 +221,7 @@
 				DEVELOPMENT_TEAM = 25563X5GPT;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = OffloadClient/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = OffloadClient;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -251,6 +252,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 25563X5GPT;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = OffloadClient/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = OffloadClient;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
