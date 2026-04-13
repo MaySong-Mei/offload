@@ -212,6 +212,14 @@ struct RecentCommit: Codable, Identifiable {
     var id: String { hash }
 }
 
+struct AgentStreamLine: Identifiable {
+    let id = UUID()
+    let topicId: String
+    let stage: String
+    let text: String
+    let timestamp = Date()
+}
+
 struct SensorModel: Codable, Identifiable {
     let sensorId: String
     let project: String

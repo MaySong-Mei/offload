@@ -28,6 +28,7 @@ final class AppModel: ObservableObject {
     @Published var isCheckingAgents = false
     @Published var sensors: [SensorModel] = []
     @Published var signals: [SignalModel] = []
+    @Published var agentConversation: [AgentStreamLine] = []
 
     // Combined list: server-discovered projects + projects referenced by topics + ungrouped slot
     var allProjectGroups: [(key: String, name: String, hasReadme: Bool, topicCount: Int)] {
@@ -587,6 +588,33 @@ final class AppModel: ObservableObject {
                         if event.eventType == "run.finished" {
                             if let key = self.selectedProjectKey, !key.isEmpty {
                                 await self.fetchActivity(projectPath: key)
+                            }
+                        }
+                        continue
+                    }
+                    // Agent streaming output → append to conversation
+                    if event.eventType == "agent.stream" {
+                        if let tid = event.topicId,
+                           let text = event.payload?["text"]?.value {
+                            let stage = event.payload?["stage"]?.value ?? ""
+                            self.agentConversation.append(AgentStreamLine(
+                                topicId: tid, stage: stage, text: text
+                            ))
+                            // Keep buffer reasonable
+                            if self.agentConversation.count > 500 {
+                                self.agentConversation.removeFirst(self.agentConversation.count - 500)
+                            }
+                        }
+                        continue
+                    }
+                    // Feedback requested → refresh topic if it's selected
+                    if event.eventType == "feedback.requested" {
+                        if let tid = event.topicId, tid == self.selectedTopicID {
+                            await self.refreshTopic(topicID: tid)
+                        }
+                        if let client = self.makeClient() {
+                            if let fresh = try? await client.fetchFeedbackQueue() {
+                                self.feedbackQueue = fresh
                             }
                         }
                         continue

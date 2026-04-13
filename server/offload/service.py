@@ -430,11 +430,45 @@ class HarnessService:
         ctx = repo.read_context()
         return ctx if ctx else None
 
+    def _make_stream_callback(self, topic_id: str) -> callable:
+        """Create a callback that streams agent output to iOS via events."""
+        conversation_lines: list = []
+
+        def _on_stream(tid: str, stage: str, chunk: str) -> None:
+            conversation_lines.append(chunk)
+            event = self._record_event(
+                "agent.stream",
+                topic_id=tid,
+                payload={"stage": stage, "text": chunk.rstrip("\n")},
+            )
+            self.event_bus.publish(event)
+
+        _on_stream._lines = conversation_lines
+        return _on_stream
+
+    def _save_conversation(self, topic_id: str, stage: str, lines: list) -> None:
+        """Save collected agent output as conversation.md in the topic workspace."""
+        state = self.store.get_topic(topic_id)
+        if state is None:
+            return
+        proj = state.project
+        text = "".join(lines)
+        # Append to conversation.md
+        conv_path = Path(self.workspace.topic_dir(topic_id, project=proj)) / "conversation.md"
+        header = f"\n\n---\n\n## {stage} ({utc_now()})\n\n"
+        try:
+            existing = conv_path.read_text() if conv_path.is_file() else "# Agent Conversation\n"
+            conv_path.write_text(existing + header + text)
+        except OSError:
+            pass
+
     def _generate_clarification(self, topic_id: str, state: TopicState, project_context: Optional[Dict[str, str]]) -> None:
         """Background thread: call Claude to generate clarifying questions, then publish as feedback requests."""
         import sys
         try:
-            questions = self.planner.generate_clarifying_questions(state, project_context)
+            stream_cb = self._make_stream_callback(topic_id)
+            questions = self.planner.generate_clarifying_questions(state, project_context, on_stream=stream_cb)
+            self._save_conversation(topic_id, "clarification", stream_cb._lines)
             with self._lock:
                 current = self.store.get_topic(topic_id)
                 if current is None:
@@ -483,8 +517,10 @@ class HarnessService:
                 documents = self.workspace.load_documents(topic_id, project=proj)
                 requirement_md = documents.get("requirement.md", "")
 
-            # Call Claude outside lock
-            plan_md = self.planner.generate_plan_doc(state, requirement_md, project_context)
+            # Call Claude outside lock (with streaming)
+            stream_cb = self._make_stream_callback(topic_id)
+            plan_md = self.planner.generate_plan_doc(state, requirement_md, project_context, on_stream=stream_cb)
+            self._save_conversation(topic_id, "planning", stream_cb._lines)
 
             with self._lock:
                 state = self.store.get_topic(topic_id)
@@ -545,7 +581,9 @@ class HarnessService:
                             })
 
             project_context = self._load_project_context(state.project)
-            requirement_md = self.planner.generate_requirement_doc(state, feedback_history, project_context)
+            stream_cb = self._make_stream_callback(topic_id)
+            requirement_md = self.planner.generate_requirement_doc(state, feedback_history, project_context, on_stream=stream_cb)
+            self._save_conversation(topic_id, "requirement", stream_cb._lines)
 
             if requirement_md:
                 with self._lock:

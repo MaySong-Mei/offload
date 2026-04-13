@@ -5,9 +5,12 @@ import subprocess
 import textwrap
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .models import FeedbackRequest, FeedbackRequestType, TopicState
+
+# Callback type: (topic_id, stage, chunk_text) -> None
+StreamCallback = Optional[Callable[[str, str, str], None]]
 
 
 class TopicPlanner:
@@ -74,6 +77,7 @@ class TopicPlanner:
         self,
         state: TopicState,
         project_context: Optional[Dict[str, str]] = None,
+        on_stream: StreamCallback = None,
     ) -> List[FeedbackRequest]:
         """Use Claude to analyze the raw input and generate clarifying questions.
 
@@ -124,7 +128,7 @@ Rules:
 - If the request is already perfectly clear, return a single confirmation question
 - Return ONLY valid JSON, no markdown fencing"""
 
-        questions = self._call_claude(prompt)
+        questions = self._call_claude(prompt, topic_id=state.topic_id, stage="clarification", on_stream=on_stream)
         if questions is None:
             # Fallback: generic confirmation
             return [self._fallback_requirement_request(state.topic_id)]
@@ -148,6 +152,7 @@ Rules:
         state: TopicState,
         feedback_history: List[Dict[str, Any]],
         project_context: Optional[Dict[str, str]] = None,
+        on_stream: StreamCallback = None,
     ) -> Optional[str]:
         """Use Claude to write a structured requirement based on the user's input + feedback answers."""
         context_block = ""
@@ -195,7 +200,7 @@ Any implementation hints based on the project context.
 
 Be concise and specific. Write ONLY the markdown document, no preamble."""
 
-        result = self._call_claude_text(prompt)
+        result = self._call_claude_text(prompt, topic_id=state.topic_id, stage="requirement", on_stream=on_stream)
         return result
 
     def generate_plan_doc(
@@ -203,6 +208,7 @@ Be concise and specific. Write ONLY the markdown document, no preamble."""
         state: TopicState,
         requirement_md: str,
         project_context: Optional[Dict[str, str]] = None,
+        on_stream: StreamCallback = None,
     ) -> Optional[str]:
         """Use Claude to generate an implementation plan based on the approved requirement."""
         context_block = ""
@@ -243,7 +249,7 @@ One paragraph describing the strategy.
 Be specific and actionable. An agent will follow this plan to implement the changes.
 Write ONLY the markdown document, no preamble."""
 
-        result = self._call_claude_text(prompt)
+        result = self._call_claude_text(prompt, topic_id=state.topic_id, stage="planning", on_stream=on_stream)
         return result
 
     # --- Feedback request constructors ---
@@ -272,9 +278,15 @@ Write ONLY the markdown document, no preamble."""
 
     # --- Private: Claude CLI integration ---
 
-    def _call_claude(self, prompt: str) -> Optional[List[Dict[str, Any]]]:
+    def _call_claude(
+        self,
+        prompt: str,
+        topic_id: str = "",
+        stage: str = "",
+        on_stream: StreamCallback = None,
+    ) -> Optional[List[Dict[str, Any]]]:
         """Call Claude CLI and parse JSON array response."""
-        text = self._call_claude_text(prompt)
+        text = self._call_claude_text(prompt, topic_id=topic_id, stage=stage, on_stream=on_stream)
         if text is None:
             return None
         # Strip markdown code fences if present
@@ -291,19 +303,39 @@ Write ONLY the markdown document, no preamble."""
             return None
 
     @staticmethod
-    def _call_claude_text(prompt: str, timeout: int = 60) -> Optional[str]:
-        """Call Claude CLI with a prompt and return raw text response."""
+    def _call_claude_text(
+        prompt: str,
+        timeout: int = 60,
+        topic_id: str = "",
+        stage: str = "",
+        on_stream: StreamCallback = None,
+    ) -> Optional[str]:
+        """Call Claude CLI and stream output line-by-line via callback.
+
+        If on_stream is provided, each line of stdout is pushed in real-time
+        as an event to the iOS client. The full output is still returned.
+        """
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 ["claude", "-p", prompt, "--output-format", "text"],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
             )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
+            collected: list[str] = []
+            for line in proc.stdout:
+                collected.append(line)
+                if on_stream and topic_id:
+                    on_stream(topic_id, stage, line)
+            proc.wait(timeout=timeout)
+            full_text = "".join(collected).strip()
+            if proc.returncode == 0 and full_text:
+                return full_text
             return None
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except FileNotFoundError:
+            return None
+        except subprocess.TimeoutExpired:
+            proc.kill()
             return None
 
     @staticmethod

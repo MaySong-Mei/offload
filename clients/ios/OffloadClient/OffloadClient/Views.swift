@@ -2215,6 +2215,9 @@ private struct TopicDetailView: View {
                     subtopicsSection
                 }
 
+                // Agent Conversation (streaming)
+                agentConversationSection
+
                 // Documents
                 documentsSection
 
@@ -2497,6 +2500,59 @@ private struct TopicDetailView: View {
                     .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
                 }
                 .buttonStyle(.plain)
+            }
+        }
+    }
+
+    // MARK: Agent Conversation
+
+    @ViewBuilder
+    private var agentConversationSection: some View {
+        let lines = model.agentConversation.filter { $0.topicId == detail.topic.topicId }
+        let hasConversation = !lines.isEmpty || detail.documents.keys.contains("conversation.md")
+
+        if hasConversation {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Agent Conversation", systemImage: "bubble.left.and.text.bubble.right")
+                    .font(.headline)
+
+                // Live stream (if active)
+                if !lines.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(lines.suffix(20)) { line in
+                            HStack(alignment: .top, spacing: 6) {
+                                if !line.stage.isEmpty {
+                                    Text(line.stage)
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(.teal)
+                                        .frame(width: 70, alignment: .trailing)
+                                }
+                                Text(line.text)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                }
+
+                // Saved conversation document
+                if let conv = detail.documents["conversation.md"], !conv.isEmpty {
+                    NavigationLink {
+                        ScrollView {
+                            Text(conv)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .padding()
+                        }
+                        .navigationTitle("Conversation Log")
+                        .navigationBarTitleDisplayMode(.inline)
+                    } label: {
+                        Label("View Full Log", systemImage: "doc.text")
+                            .font(.subheadline)
+                    }
+                }
             }
         }
     }
