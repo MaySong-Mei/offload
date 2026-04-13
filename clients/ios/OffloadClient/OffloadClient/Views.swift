@@ -2173,6 +2173,7 @@ private struct TopicDetailView: View {
     @ObservedObject var model: AppModel
     let detail: TopicDetailResponse
     @State private var refreshNote = ""
+    @State private var planNote = ""
     @State private var commandText = "/usr/bin/printf hello-from-ios"
     @State private var showingNewSubtopicSheet = false
     @State private var selectedExecutor = "command"
@@ -2340,64 +2341,96 @@ private struct TopicDetailView: View {
 
     // MARK: Workflow Actions
 
+    private var requirementApproved: Bool { detail.topic.requirementApprovedAt != nil }
+    private var planApproved: Bool { detail.topic.planApprovedAt != nil }
+    private var isImplemented: Bool { detail.topic.executionState == .implemented }
+    private var isTesting: Bool { detail.topic.executionState == .humanTesting }
+
     private var actionsSection: some View {
         CardContainer {
             Label("Workflow", systemImage: "arrow.triangle.branch")
                 .font(.headline)
 
-            // Requirement stage
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Requirement")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 8) {
-                    ActionButton("Approve", icon: "checkmark.circle", style: .primary) {
-                        await model.approveRequirement()
+            // Step 1: Requirement
+            workflowStep(
+                number: 1,
+                title: "Requirement",
+                status: requirementApproved ? .done : .active
+            ) {
+                if requirementApproved {
+                    Label("Approved", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                } else {
+                    HStack(spacing: 8) {
+                        ActionButton("Approve", icon: "checkmark.circle", style: .primary) {
+                            await model.approveRequirement()
+                        }
+                        ActionButton("Revise", icon: "arrow.clockwise", style: .secondary) {
+                            await model.refreshRequirement(note: refreshNote)
+                            refreshNote = ""
+                        }
                     }
-                    ActionButton("Refresh", icon: "arrow.clockwise", style: .secondary) {
-                        await model.refreshRequirement(note: refreshNote)
-                    }
-                }
-
-                TextField("Clarification note…", text: $refreshNote)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.footnote)
-            }
-
-            Divider()
-
-            // Plan stage
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Plan")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 8) {
-                    ActionButton("Approve", icon: "checkmark.circle", style: .primary) {
-                        await model.approvePlan()
-                    }
-                    ActionButton("Refresh", icon: "arrow.clockwise", style: .secondary) {
-                        await model.refreshPlan()
-                    }
+                    TextField("Add notes for revision…", text: $refreshNote, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.footnote)
+                        .lineLimit(1...4)
                 }
             }
 
-            Divider()
-
-            // Testing stage
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Testing")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 8) {
-                    ActionButton("Start Testing", icon: "person.fill.checkmark", style: .secondary) {
-                        await model.markHumanTesting()
+            // Step 2: Plan
+            workflowStep(
+                number: 2,
+                title: "Plan",
+                status: planApproved ? .done : (requirementApproved ? .active : .locked)
+            ) {
+                if planApproved {
+                    Label("Approved", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                } else if requirementApproved {
+                    HStack(spacing: 8) {
+                        ActionButton("Approve & Execute", icon: "play.circle", style: .primary) {
+                            await model.approvePlan()
+                        }
+                        ActionButton("Revise", icon: "arrow.clockwise", style: .secondary) {
+                            await model.refreshPlan(note: planNote)
+                            planNote = ""
+                        }
                     }
+                    TextField("Adjustments, constraints, or extra context…", text: $planNote, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.footnote)
+                        .lineLimit(1...4)
+                } else {
+                    Text("Approve requirement first")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            // Step 3: Testing
+            workflowStep(
+                number: 3,
+                title: "Testing",
+                status: detail.topic.executionState == .passed ? .done : (isImplemented || isTesting ? .active : .locked)
+            ) {
+                if detail.topic.executionState == .passed {
+                    Label("Passed", systemImage: "checkmark.seal.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                } else if isTesting {
                     ActionButton("Confirm Passed", icon: "checkmark.seal", style: .primary) {
                         await model.markPassed()
                     }
+                } else if isImplemented {
+                    ActionButton("Start Testing", icon: "person.fill.checkmark", style: .secondary) {
+                        await model.markHumanTesting()
+                    }
+                } else {
+                    Text("Implementation must complete first")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
             }
 
@@ -2406,6 +2439,51 @@ private struct TopicDetailView: View {
                 ActionButton("Archive Topic", icon: "archivebox", style: .primary) {
                     await model.archiveTopic()
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func workflowStep<Content: View>(
+        number: Int,
+        title: String,
+        status: WorkflowStepStatus,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        if number > 1 { Divider() }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                ZStack {
+                    Circle()
+                        .fill(status.color.opacity(0.15))
+                        .frame(width: 24, height: 24)
+                    if status == .done {
+                        Image(systemName: "checkmark")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(status.color)
+                    } else {
+                        Text("\(number)")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(status.color)
+                    }
+                }
+                Text(title)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(status == .locked ? .tertiary : .secondary)
+            }
+            content()
+        }
+        .opacity(status == .locked ? 0.5 : 1.0)
+    }
+
+    private enum WorkflowStepStatus {
+        case locked, active, done
+
+        var color: Color {
+            switch self {
+            case .locked: return .secondary
+            case .active: return .blue
+            case .done: return .green
             }
         }
     }
@@ -2634,51 +2712,133 @@ private struct FeedbackRequestCard: View {
     let request: FeedbackRequestModel
     @State private var selectedOption = ""
     @State private var note = ""
+    @State private var isSubmitting = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
+            // Title & prompt
             Text(request.title)
                 .font(.subheadline.weight(.semibold))
             Text(request.prompt)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
+            // Tappable option chips
             if !request.options.isEmpty {
-                Picker("Choice", selection: $selectedOption) {
+                FlowLayout(spacing: 8) {
                     ForEach(request.options, id: \.self) { option in
-                        Text(option).tag(option)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .onAppear {
-                    if selectedOption.isEmpty {
-                        selectedOption = request.options.first ?? ""
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                selectedOption = option
+                            }
+                        } label: {
+                            Text(option)
+                                .font(.subheadline)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(
+                                    selectedOption == option
+                                        ? Color.orange
+                                        : Color(.tertiarySystemFill),
+                                    in: Capsule()
+                                )
+                                .foregroundStyle(selectedOption == option ? .white : .primary)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
 
-            if request.allowNote {
-                TextField("Optional note…", text: $note)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.footnote)
-            }
+            // Note field — always visible, more inviting
+            TextField(
+                request.allowNote ? "Add a note (optional)…" : "Additional context…",
+                text: $note,
+                axis: .vertical
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.footnote)
+            .lineLimit(1...4)
 
+            // Submit
             Button {
+                isSubmitting = true
                 Task {
                     let selection = selectedOption.isEmpty ? [] : [selectedOption]
                     await model.submitFeedback(requestID: request.requestId, selectedOptions: selection, note: note)
+                    isSubmitting = false
                 }
             } label: {
-                Label("Send Feedback", systemImage: "paperplane.fill")
-                    .font(.subheadline.weight(.medium))
-                    .frame(maxWidth: .infinity)
+                if isSubmitting {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                } else {
+                    Label("Submit", systemImage: "paperplane.fill")
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity)
+                }
             }
             .buttonStyle(.borderedProminent)
             .tint(.orange)
             .controlSize(.small)
+            .disabled(selectedOption.isEmpty && note.isEmpty)
         }
         .padding(14)
         .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+/// Simple flow layout for wrapping option chips
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = computeRows(proposal: proposal, subviews: subviews)
+        let height = rows.reduce(CGFloat(0)) { total, row in
+            total + row.height + (total > 0 ? spacing : 0)
+        }
+        return CGSize(width: proposal.width ?? 0, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = computeRows(proposal: proposal, subviews: subviews)
+        var y = bounds.minY
+        var subviewIndex = 0
+        for row in rows {
+            var x = bounds.minX
+            for _ in 0..<row.count {
+                let size = subviews[subviewIndex].sizeThatFits(.unspecified)
+                subviews[subviewIndex].place(at: CGPoint(x: x, y: y), proposal: .unspecified)
+                x += size.width + spacing
+                subviewIndex += 1
+            }
+            y += row.height + spacing
+        }
+    }
+
+    private struct Row { var count: Int; var height: CGFloat }
+
+    private func computeRows(proposal: ProposedViewSize, subviews: Subviews) -> [Row] {
+        let maxWidth = proposal.width ?? .infinity
+        var rows: [Row] = []
+        var currentWidth: CGFloat = 0
+        var currentHeight: CGFloat = 0
+        var currentCount = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if currentWidth + size.width > maxWidth && currentCount > 0 {
+                rows.append(Row(count: currentCount, height: currentHeight))
+                currentWidth = 0
+                currentHeight = 0
+                currentCount = 0
+            }
+            currentWidth += size.width + spacing
+            currentHeight = max(currentHeight, size.height)
+            currentCount += 1
+        }
+        if currentCount > 0 {
+            rows.append(Row(count: currentCount, height: currentHeight))
+        }
+        return rows
     }
 }
 

@@ -236,30 +236,28 @@ class HarnessService:
             self._publish_feedback_requested(request)
             return self.get_topic_detail(topic_id)
 
-    def refresh_plan(self, topic_id: str) -> Dict[str, Any]:
+    def refresh_plan(self, topic_id: str, note: str = "") -> Dict[str, Any]:
         with self._lock:
             state = self._require_topic(topic_id)
             self._ensure_not_archived(state)
             proj = state.project
-            documents = self.workspace.load_documents(topic_id, project=proj)
-            plan = self.planner.render_plan(
-                state,
-                documents["requirement.md"],
-                shared_context=self._build_parent_context(state.parent_topic_id),
-            )
             state.plan_approved_at = None
             state.updated_at = utc_now()
             state.decision_state = DecisionState.NEEDS_FEEDBACK
-            self.workspace.write_document(topic_id, "plan.md", plan, project=proj)
-            request = self.planner.plan_feedback_request(topic_id)
-            state.pending_feedback_request_id = request.request_id
-            self.workspace.save_feedback_request(request, project=proj)
+            if note:
+                self.workspace.append_note(topic_id, "Plan Revision Request", note, project=proj)
             self.workspace.save_state(state)
             self.store.upsert_topic(state)
-            self.store.upsert_feedback_request(request)
             self._publish_topic_updated(state)
-            self._publish_feedback_requested(request)
-            return self.get_topic_detail(topic_id)
+
+        # Regenerate plan with Claude (async, with user's note as context)
+        project_context = self._load_project_context(state.project)
+        threading.Thread(
+            target=self._generate_plan,
+            args=(topic_id, project_context, note),
+            daemon=True,
+        ).start()
+        return self.get_topic_detail(topic_id)
 
     # ---- Feedback ------------------------------------------------------------
 
@@ -505,7 +503,7 @@ class HarnessService:
                 self._publish_topic_updated(current)
                 self._publish_feedback_requested(fallback)
 
-    def _generate_plan(self, topic_id: str, project_context: Optional[Dict[str, str]]) -> None:
+    def _generate_plan(self, topic_id: str, project_context: Optional[Dict[str, str]], revision_note: str = "") -> None:
         """Background thread: after requirement approval, generate plan with Claude."""
         import sys
         try:
@@ -516,6 +514,12 @@ class HarnessService:
                 proj = state.project
                 documents = self.workspace.load_documents(topic_id, project=proj)
                 requirement_md = documents.get("requirement.md", "")
+                if revision_note:
+                    # Include user's note and previous plan in the prompt
+                    prev_plan = documents.get("plan.md", "")
+                    requirement_md += f"\n\n## User's Revision Notes\n\n{revision_note}"
+                    if prev_plan and prev_plan != "# Implementation Plan\n\nPending — requirement must be approved first.":
+                        requirement_md += f"\n\n## Previous Plan (revise this)\n\n{prev_plan}"
 
             # Call Claude outside lock (with streaming)
             stream_cb = self._make_stream_callback(topic_id)

@@ -159,11 +159,11 @@ struct APIClient {
         )
     }
 
-    func refreshPlan(topicID: String) async throws -> TopicDetailResponse {
+    func refreshPlan(topicID: String, note: String = "") async throws -> TopicDetailResponse {
         try await send(
             "/topics/\(topicID)/refresh-plan",
             method: "POST",
-            body: EmptyBody(),
+            body: RefreshRequirementRequest(note: note),
             response: TopicDetailResponse.self
         )
     }

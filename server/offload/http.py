@@ -312,7 +312,7 @@ def make_handler():
                     self._write_json(HTTPStatus.OK, self.server.service.refresh_requirement(topic_id, note=payload.get("note", "")))
                     return
                 if topic_id and parsed.path == f"/topics/{topic_id}/refresh-plan":
-                    self._write_json(HTTPStatus.OK, self.server.service.refresh_plan(topic_id))
+                    self._write_json(HTTPStatus.OK, self.server.service.refresh_plan(topic_id, note=payload.get("note", "")))
                     return
                 if topic_id and parsed.path == f"/topics/{topic_id}/feedback-requests":
                     request = self.server.service.create_feedback_request(

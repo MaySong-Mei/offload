@@ -336,10 +336,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func refreshPlan() async {
+    func refreshPlan(note: String = "") async {
         guard let topicID = selectedTopicID else { return }
         await performAction(.refreshPlan(topicId: topicID)) { client in
-            try await client.refreshPlan(topicID: topicID)
+            try await client.refreshPlan(topicID: topicID, note: note)
         }
     }
 
