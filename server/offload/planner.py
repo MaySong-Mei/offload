@@ -1,8 +1,13 @@
+"""Topic planner — starts Claude sessions that operate on .offload/ data objects.
+
+The planner doesn't parse Claude's output. Instead, Claude writes directly to
+.offload/topics/<id>/ files (requirement.md, plan.md, etc.). The planner just
+constructs the right prompt and streams the session to iOS.
+"""
 from __future__ import annotations
 
 import json
 import subprocess
-import textwrap
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -10,61 +15,60 @@ from typing import Any, Callable, Dict, List, Optional
 from .models import FeedbackRequest, FeedbackRequestType, TopicState
 
 # Callback type: (topic_id, stage, event_dict) -> None
-# event_dict is a parsed stream-json event from Claude CLI
 StreamCallback = Optional[Callable[[str, str, Dict[str, Any]], None]]
+
+# System prompt template
+_SYSTEM_PROMPT_PATH = Path(__file__).parent / "templates" / "system.md"
 
 
 class TopicPlanner:
-    """Generates documents and feedback requests for topics.
+    """Manages Claude sessions that operate on .offload/ topic data objects."""
 
-    When Claude CLI is available, uses it for intelligent requirement
-    clarification and plan generation. Falls back to templates otherwise.
-    """
+    def __init__(self):
+        self._system_prompt: Optional[str] = None
 
-    # --- Document generation (templates — used as initial scaffolding) ---
+    @property
+    def system_prompt(self) -> str:
+        if self._system_prompt is None:
+            if _SYSTEM_PROMPT_PATH.is_file():
+                self._system_prompt = _SYSTEM_PROMPT_PATH.read_text()
+            else:
+                self._system_prompt = "You are an Offload agent. Read .offload/ files for context."
+        return self._system_prompt
+
+    # --- Initial document scaffolding (before first agent session) ---
 
     def initial_documents(self, state: TopicState, shared_context: Optional[str] = None) -> Dict[str, str]:
+        """Create minimal scaffolding files for a new topic."""
         parent_line = f"- Parent Topic: `{state.parent_topic_id}`" if state.parent_topic_id else "- Parent Topic: none"
-        notes = textwrap.dedent(f"""
-            # Notes
+        topic = f"""# {state.title}
 
-            ## Raw Intake
+- Topic ID: `{state.topic_id}`
+{parent_line}
+- Tags: {", ".join(state.tags) if state.tags else "none"}
 
-            {state.raw_input.strip()}
-        """).strip()
+{state.summary}"""
+
+        notes = f"""# Notes
+
+## Raw Intake
+
+{state.raw_input.strip()}"""
         if shared_context:
-            notes += textwrap.dedent(f"""
+            notes += f"\n\n## Shared Context\n\n{shared_context}"
 
-                ## Shared Context
+        requirement = f"""# Requirement
 
-                {shared_context}
-            """).rstrip()
-        topic = textwrap.dedent(f"""
-            # {state.title}
+## User Request
 
-            - Topic ID: `{state.topic_id}`
-            {parent_line}
-            - Requirement State: `{state.requirement_state.value}`
-            - Execution State: `{state.execution_state.value}`
-            - Decision State: `{state.decision_state.value}`
-            - Tags: {", ".join(state.tags) if state.tags else "none"}
+{state.raw_input.strip()}
 
-            {state.summary}
-        """).strip()
-        # Minimal requirement — will be refined by agent clarification
-        requirement = textwrap.dedent(f"""
-            # Requirement
+## Status
 
-            ## User Request
+Pending — agent will analyze and write structured requirement after discussing with user."""
 
-            {state.raw_input.strip()}
+        plan = "# Implementation Plan\n\nPending — requirement must be confirmed first."
 
-            ## Status
-
-            Awaiting clarification from agent before detailed requirement can be written.
-        """).strip()
-        # Plan is empty until requirement is approved
-        plan = "# Implementation Plan\n\nPending — requirement must be approved first."
         return {
             "topic.md": topic,
             "requirement.md": requirement,
@@ -72,184 +76,156 @@ class TopicPlanner:
             "notes.md": notes,
         }
 
-    # --- Agent-powered clarification ---
+    # --- Agent sessions ---
 
-    def generate_clarifying_questions(
+    def run_clarification(
         self,
         state: TopicState,
-        project_context: Optional[Dict[str, str]] = None,
-        on_stream: StreamCallback = None,
-        project_path: Optional[str] = None,
-    ) -> List[FeedbackRequest]:
-        """Use Claude to analyze the raw input and generate clarifying questions.
-
-        Returns a list of FeedbackRequests with GUI-friendly options.
-        Falls back to a generic confirmation if Claude is unavailable.
-        """
-        context_block = ""
-        if project_context:
-            parts = []
-            for name in ["summary.md", "architecture.md"]:
-                content = project_context.get(name, "").strip()
-                if content:
-                    parts.append(f"## {name}\n{content[:1000]}")
-            if parts:
-                context_block = "Project context:\n" + "\n\n".join(parts)
-
-        prompt = f"""You are a requirements analyst for a software project. A user has submitted a task request from their phone. You are running inside the project directory and CAN read files to understand the current state.
-
-{context_block}
-
-User's request: "{state.raw_input}"
-
-IMPORTANT: Before generating questions, READ the relevant project files to understand the current state. For example, if the user mentions version numbers, read the actual config files to find current values. Use specific, concrete information from the codebase in your questions and options.
-
-Respond with a JSON array of 1-3 clarifying questions. Each question must have:
-- "title": short question title (shown as section header on phone)
-- "prompt": the full question text (include current values you found in files)
-- "options": array of 2-4 concrete answer choices the user can tap
-- "allow_note": boolean, true if the user might want to type additional context
-
-Rules:
-- Options must be concrete and specific (include actual values from the codebase)
-- If the request is already perfectly clear, return a single confirmation question
-- Return ONLY valid JSON array, no markdown fencing, no explanation before/after"""
-
-        questions = self._call_claude(prompt, topic_id=state.topic_id, stage="clarification", on_stream=on_stream, cwd=project_path)
-        if questions is None:
-            # Fallback: generic confirmation
-            return [self._fallback_requirement_request(state.topic_id)]
-
-        requests = []
-        for i, q in enumerate(questions):
-            requests.append(FeedbackRequest(
-                request_id=f"fr-{uuid.uuid4().hex[:12]}",
-                topic_id=state.topic_id,
-                request_type=FeedbackRequestType.CHOOSE_ONE,
-                title=q.get("title", f"Question {i+1}"),
-                prompt=q.get("prompt", ""),
-                options=q.get("options", ["Yes", "No"]),
-                allow_note=q.get("allow_note", True),
-                metadata={"stage": "clarification", "question_index": i},
-            ))
-        return requests
-
-    def generate_requirement_doc(
-        self,
-        state: TopicState,
-        feedback_history: List[Dict[str, Any]],
         project_context: Optional[Dict[str, str]] = None,
         on_stream: StreamCallback = None,
         project_path: Optional[str] = None,
     ) -> Optional[str]:
-        """Use Claude to write a structured requirement based on the user's input + feedback answers."""
-        context_block = ""
-        if project_context:
-            for name in ["summary.md", "architecture.md"]:
-                content = project_context.get(name, "").strip()
-                if content:
-                    context_block += f"\n## {name}\n{content[:1000]}\n"
+        """Run a Claude session for Phase 1: understand the user's request.
 
-        feedback_block = ""
-        for fb in feedback_history:
-            feedback_block += f"\nQ: {fb.get('title', '')}: {fb.get('prompt', '')}\n"
-            feedback_block += f"A: {', '.join(fb.get('selected_options', []))}"
-            if fb.get('note'):
-                feedback_block += f" — {fb['note']}"
-            feedback_block += "\n"
+        Claude reads the project, asks questions, and writes requirement.md.
+        Returns the text result (or None if failed).
+        """
+        topic_dir = state.workspace_path
+        context_block = self._format_project_context(project_context)
 
-        prompt = f"""Write a structured requirement document for a software task.
+        prompt = f"""{self.system_prompt}
 
-Original request: "{state.raw_input}"
+---
 
-Clarification Q&A:
-{feedback_block}
+# Current Task
+
+You are in Phase 1 (Understand). The user has submitted a new task.
+
+Topic directory: `{topic_dir}`
 
 {context_block}
 
-Write the requirement in this markdown format:
+## User's Request
 
+{state.raw_input}
+
+## What To Do
+
+1. Read relevant project files to understand the current state related to this request
+2. If anything is ambiguous, explain what you found and what you need to know
+3. When you have enough understanding, write a structured `requirement.md` to `{topic_dir}/requirement.md`
+
+Use the format:
+```
 # Requirement
 
 ## Goal
-One paragraph describing what needs to be done.
+One paragraph.
 
 ## Scope
-- Bullet list of what's in scope
+- What's in scope
 
 ## Out of Scope
-- What this does NOT include
+- What's NOT included
 
 ## Success Criteria
-- How to verify this is done correctly
+- How to verify this is done
 
 ## Technical Notes
-Any implementation hints based on the project context.
+Specific files, current values, implementation hints.
+```
 
-Be concise and specific. Write ONLY the markdown document, no preamble."""
+After writing requirement.md, update `{topic_dir}/notes.md` with a summary of what you learned.
 
-        result = self._call_claude_text(prompt, topic_id=state.topic_id, stage="requirement", on_stream=on_stream, cwd=project_path)
-        return result
+Remember: write requirement.md and STOP. Do not make code changes."""
 
-    def generate_plan_doc(
+        return self._run_claude(
+            prompt, cwd=project_path,
+            topic_id=state.topic_id, stage="clarification",
+            on_stream=on_stream,
+        )
+
+    def run_planning(
         self,
         state: TopicState,
         requirement_md: str,
         project_context: Optional[Dict[str, str]] = None,
         on_stream: StreamCallback = None,
         project_path: Optional[str] = None,
+        revision_note: str = "",
     ) -> Optional[str]:
-        """Use Claude to generate an implementation plan based on the approved requirement."""
-        context_block = ""
-        if project_context:
-            for name in ["summary.md", "architecture.md", "conventions.md"]:
-                content = project_context.get(name, "").strip()
-                if content:
-                    context_block += f"\n## {name}\n{content[:1500]}\n"
+        """Run a Claude session for Phase 2: generate implementation plan.
 
-        prompt = f"""Write an implementation plan for the following approved requirement.
+        Claude reads the confirmed requirement and writes plan.md.
+        """
+        topic_dir = state.workspace_path
+        context_block = self._format_project_context(project_context)
+        revision_block = ""
+        if revision_note:
+            revision_block = f"\n## User's Revision Notes\n\n{revision_note}\n"
 
-{requirement_md}
+        prompt = f"""{self.system_prompt}
 
-Project context:
+---
+
+# Current Task
+
+You are in Phase 2 (Plan). The requirement has been confirmed by the user.
+
+Topic directory: `{topic_dir}`
+
 {context_block}
 
-Write the plan in this markdown format:
+## Confirmed Requirement
 
+{requirement_md}
+{revision_block}
+
+## What To Do
+
+1. Read the project files referenced in the requirement
+2. Write a detailed implementation plan to `{topic_dir}/plan.md`
+
+Use the format:
+```
 # Implementation Plan
 
 ## Approach
-One paragraph describing the strategy.
+One paragraph strategy.
 
 ## Steps
-1. Step one — what to do and which files to touch
+1. Step one — specific file, specific change
 2. Step two — ...
-(be specific about file paths, function names, etc.)
 
 ## Files to Change
-- `path/to/file.ext` — what changes and why
+- `path/to/file` — what changes
 
 ## Testing
-- How to verify each step worked
+- How to verify
 
 ## Risks
-- Anything that could go wrong
+- What could go wrong
+```
 
-Be specific and actionable. An agent will follow this plan to implement the changes.
-Write ONLY the markdown document, no preamble."""
+After writing plan.md, update `{topic_dir}/notes.md` with planning decisions.
 
-        result = self._call_claude_text(prompt, topic_id=state.topic_id, stage="planning", on_stream=on_stream, cwd=project_path)
-        return result
+Remember: write plan.md and STOP. Do not make code changes yet."""
 
-    # --- Feedback request constructors ---
+        return self._run_claude(
+            prompt, cwd=project_path,
+            topic_id=state.topic_id, stage="planning",
+            on_stream=on_stream,
+        )
+
+    # --- Feedback requests (still needed for the mobile GUI gate) ---
 
     def requirement_feedback_request(self, topic_id: str) -> FeedbackRequest:
         return FeedbackRequest(
             request_id=f"fr-{uuid.uuid4().hex[:12]}",
             topic_id=topic_id,
             request_type=FeedbackRequestType.CONFIRM_REQUIREMENT,
-            title="Confirm requirement",
-            prompt="Review the requirement document. Is it ready for planning?",
+            title="Review requirement",
+            prompt="The agent has written a requirement document. Review it and confirm or request changes.",
             options=["Looks good, proceed to plan", "Needs changes"],
             metadata={"approval_stage": "requirement"},
         )
@@ -259,53 +235,39 @@ Write ONLY the markdown document, no preamble."""
             request_id=f"fr-{uuid.uuid4().hex[:12]}",
             topic_id=topic_id,
             request_type=FeedbackRequestType.CONFIRM_PLAN,
-            title="Confirm plan",
-            prompt="Review the implementation plan. Ready to execute?",
+            title="Review plan",
+            prompt="The agent has written an implementation plan. Approve to execute or request changes.",
             options=["Approve, start execution", "Needs changes"],
             metadata={"approval_stage": "plan"},
         )
 
-    # --- Private: Claude CLI integration ---
+    # --- Private ---
 
-    def _call_claude(
-        self,
-        prompt: str,
-        topic_id: str = "",
-        stage: str = "",
-        on_stream: StreamCallback = None,
-        cwd: Optional[str] = None,
-    ) -> Optional[List[Dict[str, Any]]]:
-        """Call Claude CLI and parse JSON array response."""
-        text = self._call_claude_text(prompt, topic_id=topic_id, stage=stage, on_stream=on_stream, cwd=cwd)
-        if text is None:
-            return None
-        # Strip markdown code fences if present
-        text = text.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-        try:
-            result = json.loads(text)
-            if isinstance(result, list):
-                return result
-            return None
-        except json.JSONDecodeError:
-            return None
+    def _format_project_context(self, project_context: Optional[Dict[str, str]]) -> str:
+        if not project_context:
+            return ""
+        parts = []
+        for name in ["summary.md", "architecture.md", "conventions.md"]:
+            content = project_context.get(name, "").strip()
+            if content:
+                parts.append(f"## {name}\n{content[:2000]}")
+        if not parts:
+            return ""
+        return "## Project Context\n\n" + "\n\n".join(parts)
 
     @staticmethod
-    def _call_claude_text(
+    def _run_claude(
         prompt: str,
-        timeout: int = 120,
+        cwd: Optional[str] = None,
         topic_id: str = "",
         stage: str = "",
         on_stream: StreamCallback = None,
-        cwd: Optional[str] = None,
+        timeout: int = 180,
     ) -> Optional[str]:
-        """Call Claude CLI with stream-json output and push structured events.
+        """Run a Claude CLI session with stream-json output.
 
-        Uses --output-format stream-json --verbose to get full session events
-        (text, tool_use, tool_result, etc.). Each event is forwarded to iOS
-        via the on_stream callback. The final text result is returned.
+        Streams structured events to iOS via callback.
+        Returns the final text result.
         """
         try:
             proc = subprocess.Popen(
@@ -326,33 +288,16 @@ Write ONLY the markdown document, no preamble."""
                 except json.JSONDecodeError:
                     continue
 
-                # Push every event to iOS
                 if on_stream and topic_id:
                     on_stream(topic_id, stage, event)
 
-                # Extract the final result text
                 if event.get("type") == "result":
                     result_text = event.get("result", "")
 
             proc.wait(timeout=timeout)
-            if proc.returncode == 0 and result_text:
-                return result_text.strip()
             return result_text.strip() if result_text else None
         except FileNotFoundError:
             return None
         except subprocess.TimeoutExpired:
             proc.kill()
             return None
-
-    @staticmethod
-    def _fallback_requirement_request(topic_id: str) -> FeedbackRequest:
-        """Generic fallback when Claude is unavailable."""
-        return FeedbackRequest(
-            request_id=f"fr-{uuid.uuid4().hex[:12]}",
-            topic_id=topic_id,
-            request_type=FeedbackRequestType.CONFIRM_REQUIREMENT,
-            title="Confirm requirement snapshot",
-            prompt="Review the requirement. Add any missing details or approve to proceed.",
-            options=["Looks right", "Needs changes"],
-            metadata={"approval_stage": "requirement"},
-        )
