@@ -152,6 +152,13 @@ private struct ProjectCard: View {
         model.topics.filter { $0.project == project.path }.count
     }
 
+    private var activeTopicCount: Int {
+        model.topics.filter {
+            $0.project == project.path &&
+            ($0.executionState == .queued || $0.executionState == .implementing)
+        }.count
+    }
+
     private var initializingContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
@@ -235,9 +242,21 @@ private struct ProjectCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack(spacing: 8) {
-                    Label("\(topicCount)", systemImage: "doc.text")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    if activeTopicCount > 0 {
+                        Text("\(activeTopicCount) active")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor, in: Capsule())
+                        Text("/ \(topicCount) topics")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Label("\(topicCount)", systemImage: "doc.text")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Text("Ready")
                         .font(.caption2.weight(.medium))
