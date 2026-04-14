@@ -411,15 +411,6 @@ private struct ProjectDashboardView: View {
                 }
             }
 
-            // Recent Agent Changes
-            if let activity = model.projectActivity, !activity.recentRuns.isEmpty {
-                Section {
-                    recentChangesSection(runs: activity.recentRuns, commits: activity.recentCommits)
-                } header: {
-                    Label("Recent Changes", systemImage: "clock.arrow.circlepath")
-                }
-            }
-
             // Signals (from sensors)
             if !model.signals.isEmpty || !model.sensors.isEmpty {
                 Section {
@@ -437,16 +428,6 @@ private struct ProjectDashboardView: View {
                 }
             }
 
-            // Section 1: Action Required
-            if actionRequiredCount > 0 {
-                Section {
-                    actionRequiredSection
-                } header: {
-                    Label("Action Required (\(actionRequiredCount))", systemImage: "exclamationmark.circle.fill")
-                        .foregroundStyle(.orange)
-                }
-            }
-
             // Section 2: Agent Activity
             if !implementingTopics.isEmpty || !recentlyCompleted.isEmpty {
                 Section {
@@ -456,14 +437,7 @@ private struct ProjectDashboardView: View {
                 }
             }
 
-            // Section 3: Topics Pipeline
-            Section {
-                pipelineSection
-            } header: {
-                Label("Pipeline", systemImage: "chart.bar")
-            }
-
-            // Section 4: All Topics
+            // Section 3: All Topics
             Section {
                 if topics.isEmpty {
                     HStack {
@@ -1020,6 +994,40 @@ private struct ProjectDetailView: View {
                 }
             }
 
+            // Recent Agent Changes
+            if !activity.recentRuns.isEmpty {
+                Section {
+                    ForEach(activity.recentRuns.prefix(5)) { run in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                Image(systemName: run.status == "succeeded" ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                    .foregroundStyle(run.status == "succeeded" ? .green : .red)
+                                    .font(.caption)
+                                Text(run.topicTitle)
+                                    .font(.subheadline.weight(.medium))
+                                    .lineLimit(1)
+                                Spacer()
+                            }
+                            if !run.summary.isEmpty {
+                                Text(run.summary)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                } header: {
+                    Label("Recent Changes", systemImage: "clock.arrow.circlepath")
+                }
+            }
+
+            // Pipeline
+            Section {
+                pipelineView
+            } header: {
+                Label("Pipeline", systemImage: "chart.bar")
+            }
+
             // Stats
             Section {
                 HStack(spacing: 0) {
@@ -1032,7 +1040,7 @@ private struct ProjectDetailView: View {
                     StatBadge(label: "Archived", value: activity.meta.topicStats.archived, color: .secondary)
                 }
             } header: {
-                Label("Topic Stats", systemImage: "chart.bar")
+                Label("Topic Stats", systemImage: "chart.bar.fill")
             }
 
             // Recent Commits
@@ -1087,6 +1095,76 @@ private struct ProjectDetailView: View {
         .listStyle(.insetGrouped)
         .navigationTitle(activity.meta.name)
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var topics: [TopicSummary] {
+        model.topicsForSelectedProject()
+    }
+
+    private var pipelineCounts: [(label: String, state: String, count: Int, color: Color)] {
+        let states: [(String, String, Color)] = [
+            ("Captured", "captured", .secondary),
+            ("Specified", "specified", .blue),
+            ("Approved", "approved", .teal),
+            ("Building", "implementing", .indigo),
+            ("Testing", "human_testing", .orange),
+            ("Passed", "passed", .green),
+            ("Archived", "archived", .secondary),
+        ]
+        return states.map { label, state, color in
+            let count: Int
+            switch state {
+            case "captured": count = topics.filter { $0.requirementState == .captured }.count
+            case "specified": count = topics.filter { $0.requirementState == .specified || $0.requirementState == .clarifying || $0.requirementState == .discussed }.count
+            case "approved": count = topics.filter { $0.requirementApprovedAt != nil && $0.planApprovedAt == nil }.count
+            case "implementing": count = topics.filter { $0.executionState == .implementing || $0.executionState == .queued }.count
+            case "human_testing": count = topics.filter { $0.executionState == .humanTesting }.count
+            case "passed": count = topics.filter { $0.executionState == .passed && $0.decisionState != .archived }.count
+            case "archived": count = topics.filter { $0.decisionState == .archived }.count
+            default: count = 0
+            }
+            return (label, state, count, color)
+        }
+    }
+
+    @ViewBuilder
+    private var pipelineView: some View {
+        let active = pipelineCounts.filter { $0.count > 0 }
+        if active.isEmpty {
+            HStack {
+                Spacer()
+                VStack(spacing: 4) {
+                    Image(systemName: "arrow.right.arrow.left")
+                        .font(.title3)
+                        .foregroundStyle(.quaternary)
+                    Text("No topics in pipeline yet")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.vertical, 8)
+                Spacer()
+            }
+        } else {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(active, id: \.state) { item in
+                        VStack(spacing: 3) {
+                            Text("\(item.count)")
+                                .font(.title3.weight(.bold))
+                                .foregroundStyle(item.color)
+                            Text(item.label)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(minWidth: 50)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 4)
+                        .background(item.color.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
     }
 }
 
