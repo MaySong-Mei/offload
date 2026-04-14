@@ -37,14 +37,10 @@ struct RootView: View {
                 }
             }
         } detail: {
-            if let detail = model.selectedTopicDetail {
-                TopicDetailView(model: model, detail: detail)
-            } else {
-                ContentUnavailableView {
-                    Label("No Topic Selected", systemImage: "doc.text.magnifyingglass")
-                } description: {
-                    Text("Choose a topic from the list or create a new one.")
-                }
+            ContentUnavailableView {
+                Label("No Topic Selected", systemImage: "doc.text.magnifyingglass")
+            } description: {
+                Text("Choose a topic from the list or create a new one.")
             }
         }
         .sheet(isPresented: $showingNewTopicSheet) {
@@ -403,10 +399,7 @@ private struct ProjectDashboardView: View {
     }
 
     var body: some View {
-        List(selection: Binding(
-            get: { model.selectedTopicID },
-            set: { model.selectTopic($0) }
-        )) {
+        List {
             // Meta Card → taps through to project detail
             if let activity = model.projectActivity {
                 Section {
@@ -488,8 +481,11 @@ private struct ProjectDashboardView: View {
                     }
                 } else {
                     ForEach(topics) { topic in
-                        TopicRow(topic: topic)
-                            .tag(topic.topicId)
+                        NavigationLink {
+                            TopicDetailLauncher(model: model, topicId: topic.topicId)
+                        } label: {
+                            TopicRow(topic: topic)
+                        }
                     }
                 }
             } header: {
@@ -2173,6 +2169,27 @@ private struct NewTopicSheet: View {
 }
 
 // MARK: - Topic Detail
+
+/// Loads topic detail on appear and shows TopicDetailView.
+/// Used as NavigationLink destination so topics can be tapped from the list.
+private struct TopicDetailLauncher: View {
+    @ObservedObject var model: AppModel
+    let topicId: String
+
+    var body: some View {
+        Group {
+            if let detail = model.selectedTopicDetail, detail.topic.topicId == topicId {
+                TopicDetailView(model: model, detail: detail)
+            } else {
+                ProgressView("Loading…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .task {
+            model.selectTopic(topicId)
+        }
+    }
+}
 
 private struct TopicDetailView: View {
     @ObservedObject var model: AppModel
