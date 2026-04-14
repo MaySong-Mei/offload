@@ -508,6 +508,26 @@ class IndexStore:
 
     # --- Events ---
 
+    def list_events_for_topic(self, topic_id: str, after_sequence: int = 0, limit: int = 500) -> List[EventRecord]:
+        rows = self.connection.execute(
+            "SELECT * FROM events WHERE topic_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?",
+            (topic_id, after_sequence, limit),
+        ).fetchall()
+        return [
+            EventRecord.from_json_dict(
+                {
+                    "sequence": row["sequence"],
+                    "event_id": row["event_id"],
+                    "event_type": row["event_type"],
+                    "topic_id": row["topic_id"],
+                    "run_id": row["run_id"],
+                    "created_at": row["created_at"],
+                    "payload": json.loads(row["payload_json"]),
+                }
+            )
+            for row in rows
+        ]
+
     def list_events(self, after_sequence: int = 0, limit: int = 200) -> List[EventRecord]:
         rows = self.connection.execute(
             "SELECT * FROM events WHERE sequence > ? ORDER BY sequence ASC LIMIT ?",

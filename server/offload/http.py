@@ -182,6 +182,9 @@ def make_handler():
             if topic_id and parsed.path == f"/topics/{topic_id}/artifacts":
                 self._write_json(HTTPStatus.OK, {"artifacts": self.server.service.list_artifacts(topic_id)})
                 return
+            if topic_id and parsed.path == f"/topics/{topic_id}/stream":
+                self._handle_sse_stream(topic_id, parsed)
+                return
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
         def do_POST(self) -> None:
@@ -400,6 +403,74 @@ def make_handler():
                 return parts[1]
             return None
 
+        def _handle_sse_stream(self, topic_id: str, parsed) -> None:
+            """Server-Sent Events stream filtered to a single topic."""
+            topic = self.server.service.store.get_topic(topic_id)
+            if topic is None:
+                self._write_json(HTTPStatus.NOT_FOUND, {"error": f"Topic {topic_id} not found"})
+                return
+
+            # Determine replay point from Last-Event-ID header or ?after= query param
+            query = parse_qs(parsed.query)
+            after_header = 0
+            last_event_id = self.headers.get("Last-Event-ID")
+            if last_event_id:
+                try:
+                    after_header = int(last_event_id)
+                except ValueError:
+                    pass
+            after_query = int(query.get("after", ["0"])[0])
+            after_sequence = max(after_header, after_query)
+
+            # Subscribe to EventBus BEFORE replaying to avoid missing events
+            subscriber_id, subscription = self.server.service.event_bus.subscribe()
+
+            try:
+                # Send SSE response headers
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+
+                # Replay phase: send stored events after the given sequence
+                replayed = self.server.service.store.list_events_for_topic(topic_id, after_sequence)
+                last_seq = after_sequence
+                for event in replayed:
+                    self.wfile.write(_format_sse(event))
+                    self.wfile.flush()
+                    if event.sequence and event.sequence > last_seq:
+                        last_seq = event.sequence
+
+                # Live phase: stream new events from EventBus
+                while True:
+                    try:
+                        event = subscription.get(timeout=15.0)
+                    except queue.Empty:
+                        # Send keepalive comment
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        continue
+
+                    # Skip events for other topics
+                    if event.topic_id != topic_id:
+                        continue
+                    # Skip events already sent during replay
+                    if event.sequence is not None and event.sequence <= last_seq:
+                        continue
+
+                    self.wfile.write(_format_sse(event))
+                    self.wfile.flush()
+                    if event.sequence and event.sequence > last_seq:
+                        last_seq = event.sequence
+
+            except (BrokenPipeError, ConnectionError, OSError):
+                pass
+            finally:
+                self.server.service.event_bus.unsubscribe(subscriber_id)
+
         def _handle_websocket(self) -> None:
             self.log_message("WebSocket upgrade from %s", self.address_string())
             key = self.headers.get("Sec-WebSocket-Key")
@@ -508,3 +579,15 @@ def _encode_frame(text: str, opcode: int = 0x1) -> bytes:
         header.append(127)
         header.extend(length.to_bytes(8, "big"))
     return bytes(header) + payload
+
+
+def _format_sse(event) -> bytes:
+    """Format an EventRecord as an SSE message."""
+    lines = []
+    if event.sequence is not None:
+        lines.append(f"id: {event.sequence}")
+    lines.append(f"event: {event.event_type}")
+    lines.append(f"data: {json.dumps(event.to_json_dict())}")
+    lines.append("")
+    lines.append("")
+    return "\n".join(lines).encode("utf-8")
