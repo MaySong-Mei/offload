@@ -137,9 +137,27 @@ xcodebuild \
   test
 ```
 
+## Self-Iteration: April 14, 2026
+
+On this date, Offload successfully used itself to modify its own codebase — the first self-bootstrapping iteration.
+
+**What happened:**
+
+1. A topic was created via the Offload API: *"Simplify project dashboard — move pipeline and activity into meta card"*
+2. The Offload agent (Claude Code) read the Offload iOS client source code (`Views.swift`), identified the exact lines to change, and wrote a structured `requirement.md` with specific file paths and line numbers
+3. After human approval on the phone, the agent generated a detailed 8-step `plan.md`
+4. After human approval, the agent executed the plan: deleted 184 lines of dead code, added 54 lines of new code, enriched the Meta Card with pipeline stats and agent activity indicators, and added attention badges to topic rows
+5. The agent wrote a structured report. The human reviewed and pushed the commit: `ed49fe0`
+
+**Why this matters:**
+
+This proved that the Offload architecture works end-to-end — a human on a phone can describe a change, an agent understands the codebase, plans the work, executes it, and reports back. The `.offload/` data object served as the single source of truth between the agent sessions and the human gates. No manual coding was needed; the system iterated on itself.
+
+The commit message reads: *"feat: simplify dashboard — pipeline + activity in meta card (offload self-iteration)"*
+
 ## Status
 
-Early-stage. Currently in the middle of migrating from a server-owned topic workspace to the `.offload/`-per-repo architecture described above. The two are not fully compatible yet.
+Active development. The core architecture — `.offload/` data objects, agent-powered clarification and planning, human confirmation gates, streaming session output to iOS — is functional. The system can iterate on itself.
 
 ## Why "Offload"?
 
