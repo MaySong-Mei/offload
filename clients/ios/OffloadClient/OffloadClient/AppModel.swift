@@ -566,7 +566,7 @@ final class AppModel: ObservableObject {
                         continue
                     }
                     // Run/topic events → targeted partial refresh (not full reload)
-                    if event.eventType == "run.finished" || event.eventType == "run.started" || event.eventType == "topic.updated" {
+                    if event.eventType == "run.finished" || event.eventType == "run.started" || event.eventType == "topic.updated" || event.eventType == "topic.created" || event.eventType == "topic.subtopic_created" {
                         let affectedTopicId = event.payload?["topic_id"]?.value
                             ?? event.topicId
 
@@ -586,7 +586,7 @@ final class AppModel: ObservableObject {
                         }
 
                         // 3. Refresh activity only for the current project dashboard
-                        if event.eventType == "run.finished" {
+                        if event.eventType == "run.finished" || event.eventType == "topic.created" {
                             if let key = self.selectedProjectKey, !key.isEmpty {
                                 await self.fetchActivity(projectPath: key)
                             }
