@@ -1,5 +1,20 @@
 import SwiftUI
 
+// MARK: - Shared Helpers
+
+private func _relativeTime(_ isoDate: String) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let date = formatter.date(from: isoDate) ?? ISO8601DateFormatter().date(from: isoDate) else {
+        return isoDate.prefix(10).description
+    }
+    let interval = Date.now.timeIntervalSince(date)
+    if interval < 60 { return "just now" }
+    if interval < 3600 { return "\(Int(interval / 60))m ago" }
+    if interval < 86400 { return "\(Int(interval / 3600))h ago" }
+    return "\(Int(interval / 86400))d ago"
+}
+
 // MARK: - Root (3-column NavigationSplitView)
 
 struct RootView: View {
@@ -692,7 +707,7 @@ private struct ProjectDashboardView: View {
                         .lineLimit(1)
                     Spacer()
                     if let date = run.finishedAt {
-                        Text(Self.relativeTime(date))
+                        Text(_relativeTime(date))
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
@@ -728,21 +743,11 @@ private struct ProjectDashboardView: View {
     }
 
     private static func relativeTime(_ isoDate: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let date = formatter.date(from: isoDate) ?? ISO8601DateFormatter().date(from: isoDate) else {
-            return isoDate.prefix(10).description
-        }
-        let interval = Date.now.timeIntervalSince(date)
-        if interval < 60 { return "just now" }
-        if interval < 3600 { return "\(Int(interval / 60))m ago" }
-        if interval < 86400 { return "\(Int(interval / 3600))h ago" }
-        return "\(Int(interval / 86400))d ago"
+        _relativeTime(isoDate)
     }
 
     // MARK: Section 5 — Project Context
 
-    @ViewBuilder
     private func loadReadme() async {
         guard let key = model.selectedProjectKey, !key.isEmpty else {
             readmeContent = nil
@@ -2341,7 +2346,7 @@ private struct TopicDetailView: View {
                         .lineLimit(3)
                 }
                 if !timestamp.isEmpty {
-                    Text(Self.relativeTime(timestamp))
+                    Text(_relativeTime(timestamp))
                         .font(.caption2)
                         .foregroundStyle(.quaternary)
                 }
@@ -2393,7 +2398,7 @@ private struct TopicDetailView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text(Self.relativeTime(timestamp))
+                Text(_relativeTime(timestamp))
                     .font(.caption2)
                     .foregroundStyle(.quaternary)
             }
@@ -2485,7 +2490,7 @@ private struct TopicDetailView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                 if let finished = run.finishedAt {
-                    Text(Self.relativeTime(finished))
+                    Text(_relativeTime(finished))
                         .font(.caption2)
                         .foregroundStyle(.quaternary)
                 }
