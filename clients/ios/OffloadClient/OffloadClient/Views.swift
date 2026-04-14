@@ -2206,90 +2206,109 @@ private struct TopicDetailView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-
-                    // 1. Topic created bubble
-                    agentBubble(
-                        "Topic created: \(detail.topic.title)",
-                        detail: detail.topic.rawInput,
-                        timestamp: detail.topic.createdAt
-                    )
-
-                    // 2. Agent streaming output (clarification phase)
-                    if !streamLines.isEmpty {
-                        agentStreamBubble(lines: streamLines.filter { $0.stage == "clarification" })
-                    }
-
-                    // 3. Resolved feedback (past Q&A)
-                    ForEach(resolvedFeedback) { request in
-                        // Agent's question
-                        agentBubble(request.title, detail: request.prompt, timestamp: request.createdAt)
-
-                        // User's answer (find matching response)
-                        if let response = findResponse(for: request) {
-                            userBubble(
-                                options: response.selectedOptions,
-                                note: response.note,
-                                timestamp: response.createdAt
-                            )
+                VStack(alignment: .leading, spacing: 0) {
+                    // Header
+                    sectionDivider("Topic", timestamp: detail.topic.createdAt)
+                    Text(detail.topic.rawInput)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 8)
+                    HStack(spacing: 6) {
+                        StatusChip(text: detail.topic.requirementState.rawValue, category: .requirement)
+                        StatusChip(text: detail.topic.executionState.rawValue, category: .execution)
+                        if detail.topic.decisionState != .none {
+                            StatusChip(text: detail.topic.decisionState.rawValue, category: .decision)
                         }
                     }
+                    .padding(.bottom, 16)
 
-                    // 4. Requirement document (if generated)
+                    // Resolved feedback (past Q&A)
+                    ForEach(resolvedFeedback) { request in
+                        sectionDivider("Agent")
+                        Text(request.prompt)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(.bottom, 8)
+                        // Show options that were available
+                        HStack(spacing: 6) {
+                            ForEach(request.options, id: \.self) { opt in
+                                Text(opt)
+                                    .font(.caption)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Color(.tertiarySystemFill), in: Capsule())
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .padding(.bottom, 4)
+                        Text("Answered")
+                            .font(.caption2)
+                            .foregroundStyle(.green)
+                            .padding(.bottom, 16)
+                    }
+
+                    // Streaming output (requirement/plan — not clarification which is JSON)
+                    let reqStream = streamLines.filter { $0.stage == "requirement" }
+                    if !reqStream.isEmpty {
+                        sectionDivider("Agent", subtitle: "generating requirement")
+                        agentStreamBlock(lines: reqStream)
+                    }
+
+                    // Requirement document
                     if let req = detail.documents["requirement.md"],
                        !req.contains("Awaiting clarification") {
-                        // Show stream for requirement generation
-                        if !streamLines.filter({ $0.stage == "requirement" }).isEmpty {
-                            agentStreamBubble(lines: streamLines.filter { $0.stage == "requirement" })
-                        }
-                        documentBubble(title: "Requirement", key: "requirement.md", content: req)
-
-                        // Requirement approval status
+                        sectionDivider("Requirement")
+                        documentLink(title: "Requirement", content: req)
                         if detail.topic.requirementApprovedAt != nil {
-                            statusBubble("Requirement approved", icon: "checkmark.circle.fill", color: .green)
+                            statusBadge("Approved", color: .green)
                         }
                     }
 
-                    // 5. Pending feedback questions (interactive)
+                    // Pending feedback (interactive)
                     ForEach(pendingFeedback) { request in
-                        agentBubble(request.title, detail: request.prompt, timestamp: request.createdAt)
+                        sectionDivider("Agent")
                         FeedbackRequestCard(model: model, request: request)
-                            .padding(.leading, 4)
+                            .padding(.bottom, 16)
                     }
 
-                    // 6. Plan document (if generated)
+                    // Streaming output (plan)
+                    let planStream = streamLines.filter { $0.stage == "planning" }
+                    if !planStream.isEmpty {
+                        sectionDivider("Agent", subtitle: "generating plan")
+                        agentStreamBlock(lines: planStream)
+                    }
+
+                    // Plan document
                     if let plan = detail.documents["plan.md"],
                        !plan.contains("Pending — requirement must be approved first") {
-                        if !streamLines.filter({ $0.stage == "planning" }).isEmpty {
-                            agentStreamBubble(lines: streamLines.filter { $0.stage == "planning" })
-                        }
-                        documentBubble(title: "Implementation Plan", key: "plan.md", content: plan)
-
+                        sectionDivider("Plan")
+                        documentLink(title: "Implementation Plan", content: plan)
                         if detail.topic.planApprovedAt != nil {
-                            statusBubble("Plan approved", icon: "checkmark.circle.fill", color: .green)
+                            statusBadge("Approved", color: .green)
                         }
                     }
 
-                    // 7. Workflow actions (contextual)
+                    // Contextual actions
                     workflowActions
 
-                    // 8. Runs
+                    // Runs
                     ForEach(detail.runs) { run in
-                        runBubble(run: run)
+                        sectionDivider("Run", subtitle: run.executor)
+                        runBlock(run: run)
                     }
 
-                    // 9. Archive status
+                    // Archive
                     if detail.topic.decisionState == .archived {
-                        statusBubble("Topic archived", icon: "archivebox.fill", color: .secondary)
+                        sectionDivider("Archived")
                     }
 
-                    // Bottom anchor for auto-scroll
                     Color.clear.frame(height: 1).id("bottom")
                 }
-                .padding(16)
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
             }
         }
-        .background(Color(.systemGroupedBackground))
+        .background(Color(.systemBackground))
         .navigationTitle(detail.topic.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -2298,7 +2317,6 @@ private struct TopicDetailView: View {
                     Button { showingNewSubtopicSheet = true } label: {
                         Label("New Subtopic", systemImage: "plus.circle")
                     }
-                    // Quick access to documents
                     if let conv = detail.documents["conversation.md"], !conv.isEmpty {
                         NavigationLink {
                             ScrollView {
@@ -2320,30 +2338,22 @@ private struct TopicDetailView: View {
         .sheet(isPresented: $showingNewSubtopicSheet) {
             NewTopicSheet(model: model, parentTopic: detail.topic)
         }
-        .task(id: detail.topic.project) {
-            await loadReadmeIfNeeded()
-        }
     }
 
-    // MARK: - Conversation Bubbles
+    // MARK: - Claude Code Style Components
 
     @ViewBuilder
-    private func agentBubble(_ title: String, detail: String = "", timestamp: String = "") -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "cpu")
-                .font(.caption)
-                .foregroundStyle(.teal)
-                .frame(width: 20, height: 20)
-                .padding(.top, 2)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.subheadline.weight(.medium))
-                if !detail.isEmpty {
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
+    private func sectionDivider(_ label: String, subtitle: String = "", timestamp: String = "") -> some View {
+        HStack(spacing: 0) {
+            Rectangle().fill(Color.secondary.opacity(0.2)).frame(width: 12, height: 1)
+            HStack(spacing: 6) {
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
                 if !timestamp.isEmpty {
                     Text(_relativeTime(timestamp))
@@ -2351,155 +2361,88 @@ private struct TopicDetailView: View {
                         .foregroundStyle(.quaternary)
                 }
             }
-            .padding(10)
-            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
-
-            Spacer(minLength: 40)
+            .padding(.horizontal, 8)
+            Rectangle().fill(Color.secondary.opacity(0.2)).frame(height: 1)
         }
+        .padding(.vertical, 10)
     }
 
     @ViewBuilder
-    private func agentStreamBubble(lines: [AgentStreamLine]) -> some View {
-        if !lines.isEmpty {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "cpu")
-                    .font(.caption)
-                    .foregroundStyle(.teal)
-                    .frame(width: 20, height: 20)
-                    .padding(.top, 2)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(lines.suffix(15)) { line in
-                        Text(line.text)
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(10)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
-
-                Spacer(minLength: 40)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func userBubble(options: [String], note: String, timestamp: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Spacer(minLength: 40)
-
-            VStack(alignment: .trailing, spacing: 4) {
-                if !options.isEmpty {
-                    Text(options.joined(separator: ", "))
-                        .font(.subheadline.weight(.medium))
-                }
-                if !note.isEmpty {
-                    Text(note)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Text(_relativeTime(timestamp))
-                    .font(.caption2)
-                    .foregroundStyle(.quaternary)
-            }
-            .padding(10)
-            .background(Color.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
-
-            Image(systemName: "person.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.blue)
-                .frame(width: 20, height: 20)
-                .padding(.top, 2)
-        }
-    }
-
-    @ViewBuilder
-    private func documentBubble(title: String, key: String, content: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "cpu")
-                .font(.caption)
-                .foregroundStyle(.teal)
-                .frame(width: 20, height: 20)
-                .padding(.top, 2)
-
-            NavigationLink {
-                ScrollView {
-                    Text(content)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding()
-                }
-                .navigationTitle(title)
-                .navigationBarTitleDisplayMode(.inline)
-            } label: {
-                HStack {
-                    Image(systemName: "doc.text.fill")
-                        .foregroundStyle(.teal)
-                    Text(title)
-                        .font(.subheadline.weight(.medium))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-                .padding(10)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
-            }
-            .buttonStyle(.plain)
-
-            Spacer(minLength: 40)
-        }
-    }
-
-    @ViewBuilder
-    private func statusBubble(_ text: String, icon: String, color: Color) -> some View {
-        HStack {
-            Spacer()
-            Label(text, systemImage: icon)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(color)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(color.opacity(0.1), in: Capsule())
-            Spacer()
-        }
-    }
-
-    @ViewBuilder
-    private func runBubble(run: RunRecordModel) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "cpu")
-                .font(.caption)
-                .foregroundStyle(.teal)
-                .frame(width: 20, height: 20)
-                .padding(.top, 2)
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Image(systemName: run.status == "succeeded" ? "checkmark.circle.fill" : run.status == "running" ? "arrow.trianglehead.2.clockwise" : "xmark.circle.fill")
-                        .foregroundStyle(run.status == "succeeded" ? .green : run.status == "running" ? .blue : .red)
-                    Text("Run: \(run.executor)")
-                        .font(.subheadline.weight(.medium))
-                    Spacer()
-                    Text(run.status)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Text(run.summary)
-                    .font(.caption)
+    private func agentStreamBlock(lines: [AgentStreamLine]) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(lines.suffix(20)) { line in
+                Text(line.text)
+                    .font(.system(.caption2, design: .monospaced))
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+            }
+        }
+        .padding(.bottom, 12)
+    }
+
+    @ViewBuilder
+    private func documentLink(title: String, content: String) -> some View {
+        NavigationLink {
+            ScrollView {
+                Text(content)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding()
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "doc.text")
+                    .foregroundStyle(.teal)
+                Text(title)
+                    .font(.subheadline)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .padding(.bottom, 8)
+    }
+
+    @ViewBuilder
+    private func statusBadge(_ text: String, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "checkmark")
+                .font(.caption2.weight(.bold))
+            Text(text)
+                .font(.caption2.weight(.medium))
+        }
+        .foregroundStyle(color)
+        .padding(.bottom, 12)
+    }
+
+    @ViewBuilder
+    private func runBlock(run: RunRecordModel) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: run.status == "succeeded" ? "checkmark.circle.fill" : run.status == "running" ? "progress.indicator" : "xmark.circle.fill")
+                    .foregroundStyle(run.status == "succeeded" ? .green : run.status == "running" ? .blue : .red)
+                    .font(.caption)
+                Text(run.status)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(run.status == "succeeded" ? .green : run.status == "running" ? .blue : .red)
+                Spacer()
                 if let finished = run.finishedAt {
                     Text(_relativeTime(finished))
                         .font(.caption2)
                         .foregroundStyle(.quaternary)
                 }
             }
-            .padding(10)
-            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
-
-            Spacer(minLength: 20)
+            Text(run.summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
+        .padding(.bottom, 16)
     }
 
     // MARK: - Contextual Workflow Actions
@@ -2508,179 +2451,77 @@ private struct TopicDetailView: View {
     private var workflowActions: some View {
         let topic = detail.topic
 
-        // Show the next relevant action based on current state
         if topic.decisionState == .archived {
             EmptyView()
         } else if topic.executionState == .humanTesting {
-            actionRow {
-                ActionButton("Confirm Passed", icon: "checkmark.seal", style: .primary) {
-                    await model.markPassed()
-                }
+            sectionDivider("Action")
+            ActionButton("Confirm Passed", icon: "checkmark.seal", style: .primary) {
+                await model.markPassed()
             }
+            .padding(.bottom, 12)
         } else if topic.executionState == .implemented {
-            actionRow {
-                ActionButton("Start Testing", icon: "person.fill.checkmark", style: .secondary) {
-                    await model.markHumanTesting()
-                }
+            sectionDivider("Action")
+            ActionButton("Start Testing", icon: "person.fill.checkmark", style: .secondary) {
+                await model.markHumanTesting()
             }
+            .padding(.bottom, 12)
         } else if topic.planApprovedAt != nil && topic.executionState == .idle {
-            // Ready to execute
-            actionRow {
-                ActionButton("Launch Claude Agent", icon: "play.circle.fill", style: .primary) {
-                    await model.triggerRun(executor: "claude", commandText: "")
-                }
+            sectionDivider("Execute")
+            ActionButton("Launch Claude Agent", icon: "play.circle.fill", style: .primary) {
+                await model.triggerRun(executor: "claude", commandText: "")
             }
+            .padding(.bottom, 12)
         } else if topic.requirementApprovedAt != nil && topic.planApprovedAt == nil {
-            // Plan review phase
             if let plan = detail.documents["plan.md"],
                !plan.contains("Pending — requirement must be approved first") {
-                HStack(alignment: .top, spacing: 8) {
-                    Spacer(minLength: 40)
-                    VStack(spacing: 8) {
-                        HStack(spacing: 8) {
-                            ActionButton("Approve & Execute", icon: "play.circle", style: .primary) {
-                                await model.approvePlan()
-                            }
-                            ActionButton("Revise", icon: "arrow.clockwise", style: .secondary) {
-                                await model.refreshPlan(note: planNote)
-                                planNote = ""
-                            }
+                sectionDivider("Review Plan")
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        ActionButton("Approve & Execute", icon: "play.circle", style: .primary) {
+                            await model.approvePlan()
                         }
-                        TextField("Adjustments or constraints…", text: $planNote, axis: .vertical)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.footnote)
-                            .lineLimit(1...3)
+                        ActionButton("Revise", icon: "arrow.clockwise", style: .secondary) {
+                            await model.refreshPlan(note: planNote)
+                            planNote = ""
+                        }
                     }
-                    .padding(10)
-                    .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                    TextField("Adjustments or constraints…", text: $planNote, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.footnote)
+                        .lineLimit(1...3)
                 }
+                .padding(.bottom, 12)
             }
         } else if topic.requirementApprovedAt == nil {
-            // Requirement review phase
             if let req = detail.documents["requirement.md"],
                !req.contains("Awaiting clarification"),
                pendingFeedback.isEmpty {
-                HStack(alignment: .top, spacing: 8) {
-                    Spacer(minLength: 40)
-                    VStack(spacing: 8) {
-                        HStack(spacing: 8) {
-                            ActionButton("Approve Requirement", icon: "checkmark.circle", style: .primary) {
-                                await model.approveRequirement()
-                            }
-                            ActionButton("Revise", icon: "arrow.clockwise", style: .secondary) {
-                                await model.refreshRequirement(note: refreshNote)
-                                refreshNote = ""
-                            }
+                sectionDivider("Review Requirement")
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        ActionButton("Approve", icon: "checkmark.circle", style: .primary) {
+                            await model.approveRequirement()
                         }
-                        TextField("Revision notes…", text: $refreshNote, axis: .vertical)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.footnote)
-                            .lineLimit(1...3)
+                        ActionButton("Revise", icon: "arrow.clockwise", style: .secondary) {
+                            await model.refreshRequirement(note: refreshNote)
+                            refreshNote = ""
+                        }
                     }
-                    .padding(10)
-                    .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                    TextField("Revision notes…", text: $refreshNote, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.footnote)
+                        .lineLimit(1...3)
                 }
+                .padding(.bottom, 12)
             }
         }
 
         if canArchive {
-            actionRow {
-                ActionButton("Archive Topic", icon: "archivebox", style: .secondary) {
-                    await model.archiveTopic()
-                }
+            sectionDivider("Complete")
+            ActionButton("Archive Topic", icon: "archivebox", style: .secondary) {
+                await model.archiveTopic()
             }
-        }
-    }
-
-    @ViewBuilder
-    private func actionRow<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        HStack {
-            Spacer()
-            content()
-            Spacer()
-        }
-        .padding(.vertical, 4)
-    }
-
-    // MARK: - Helpers
-
-    private func findResponse(for request: FeedbackRequestModel) -> (selectedOptions: [String], note: String, createdAt: String)? {
-        // Look through all resolved feedback to find matching response
-        // We don't have responses in detail directly, but we can infer from the request being resolved
-        // For now return nil — responses come through the feedback flow
-        // TODO: include responses in TopicDetailResponse
-        nil
-    }
-
-    private func loadReadmeIfNeeded() async {
-        guard let project = detail.topic.project, !project.isEmpty else {
-            readmeContent = nil
-            loadedReadmeForProject = nil
-            return
-        }
-        if loadedReadmeForProject == project { return }
-        loadedReadmeForProject = project
-        readmeContent = await model.fetchReadme(projectPath: project)
-    }
-
-    @ViewBuilder
-    private func readmeSection(content: String) -> some View {
-        DisclosureGroup {
-            ReadmeView(content: content)
-                .padding(.top, 8)
-        } label: {
-            Label("README", systemImage: "doc.text.fill")
-                .font(.headline)
-        }
-        .padding(18)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    // MARK: Header
-
-    private var headerSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(detail.topic.title)
-                .font(.title.weight(.bold))
-
-            if !detail.topic.summary.isEmpty {
-                Text(detail.topic.summary)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack(spacing: 8) {
-                StatusChip(text: detail.topic.requirementState.rawValue, category: .requirement)
-                StatusChip(text: detail.topic.executionState.rawValue, category: .execution)
-                if detail.topic.decisionState != .none {
-                    StatusChip(text: detail.topic.decisionState.rawValue, category: .decision)
-                }
-            }
-
-            if let project = detail.topic.project, !project.isEmpty {
-                Label(project, systemImage: "folder.fill")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-
-            if !detail.topic.workspacePath.isEmpty {
-                Label(detail.topic.workspacePath, systemImage: "externaldrive")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-            }
-
-            if let parentTopic = detail.parentTopic {
-                Button {
-                    model.selectTopic(parentTopic.topicId)
-                } label: {
-                    Label(parentTopic.title, systemImage: "arrow.turn.up.left")
-                        .font(.subheadline)
-                }
-                .tint(.secondary)
-            }
+            .padding(.bottom, 12)
         }
     }
 
