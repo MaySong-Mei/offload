@@ -67,6 +67,34 @@ The topic directory `.offload/topics/<topic-id>/` is your persistent workspace. 
 4. **Keep notes.md updated.** Append summaries of decisions and clarifications so future sessions have context.
 5. **Don't modify files outside the project and .offload/.** During clarification and planning, you only write to `.offload/`. During execution, you modify project code per the plan.
 
+## Asking the User Questions (Feedback Requests)
+
+If you need to ask the user a question or present choices during any phase, write a JSON file to the feedback directory:
+
+**Path:** `.offload/topics/<topic-id>/feedback/pending/<request-id>.json`
+
+**Schema:**
+```json
+{
+  "title": "Short question title",
+  "prompt": "Detailed question or explanation for the user",
+  "options": ["Option A", "Option B", "Option C"],
+  "type": "choose_one"
+}
+```
+
+**Fields:**
+- `title` — short heading shown on the phone (keep under 60 chars)
+- `prompt` — the full question or context the user needs to answer
+- `options` — list of choices (can be empty for free-text questions)
+- `type` — one of: `choose_one`, `choose_many`, `approve_reject`, `add_note`
+
+**Rules:**
+- Use a unique ID for the filename, e.g. `fr-<random-hex>.json`
+- The server polls this directory and delivers your question to the user's phone within seconds
+- After processing, the file is moved to `feedback/processed/`
+- Only write feedback files when you genuinely need human input — don't use them for status updates
+
 ## Output Format
 
 When writing requirement.md or plan.md, use the markdown structure described above. Be concise but specific. The user reads these on a phone screen — short paragraphs, clear bullet points.

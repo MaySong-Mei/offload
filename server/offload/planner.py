@@ -153,6 +153,7 @@ Remember: write requirement.md and STOP. Do not make code changes."""
         on_stream: StreamCallback = None,
         project_path: Optional[str] = None,
         revision_note: str = "",
+        resume_session_id: Optional[str] = None,
     ) -> Optional[str]:
         """Run a Claude session for Phase 2: generate implementation plan.
 
@@ -215,6 +216,7 @@ Remember: write plan.md and STOP. Do not make code changes yet."""
             prompt, cwd=project_path,
             topic_id=state.topic_id, stage="planning",
             on_stream=on_stream,
+            resume_session_id=resume_session_id,
         )
 
     # --- Feedback requests (still needed for the mobile GUI gate) ---
@@ -262,7 +264,8 @@ Remember: write plan.md and STOP. Do not make code changes yet."""
         topic_id: str = "",
         stage: str = "",
         on_stream: StreamCallback = None,
-        timeout: int = 180,
+        timeout: int = 600,
+        resume_session_id: Optional[str] = None,
     ) -> Optional[str]:
         """Run a Claude CLI session with stream-json output.
 
@@ -270,9 +273,13 @@ Remember: write plan.md and STOP. Do not make code changes yet."""
         Returns the final text result.
         """
         try:
+            cmd = ["claude"]
+            if resume_session_id:
+                cmd.extend(["--resume", resume_session_id])
+            cmd.extend(["-p", prompt, "--output-format", "stream-json",
+                        "--verbose", "--dangerously-skip-permissions"])
             proc = subprocess.Popen(
-                ["claude", "-p", prompt, "--output-format", "stream-json",
-                 "--verbose", "--dangerously-skip-permissions"],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

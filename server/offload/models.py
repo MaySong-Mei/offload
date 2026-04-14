@@ -85,6 +85,7 @@ class TopicState:
     pending_feedback_request_id: Optional[str] = None
     assigned_executor: Optional[str] = None
     workspace_path: str = ""
+    session_id: Optional[str] = None
 
     def to_json_dict(self) -> Dict[str, Any]:
         return {
@@ -107,6 +108,7 @@ class TopicState:
             "pending_feedback_request_id": self.pending_feedback_request_id,
             "assigned_executor": self.assigned_executor,
             "workspace_path": self.workspace_path,
+            "session_id": self.session_id,
         }
 
     @classmethod
@@ -131,6 +133,7 @@ class TopicState:
             pending_feedback_request_id=payload.get("pending_feedback_request_id"),
             assigned_executor=payload.get("assigned_executor"),
             workspace_path=payload.get("workspace_path", ""),
+            session_id=payload.get("session_id"),
         )
 
 

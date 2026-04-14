@@ -438,7 +438,17 @@ class HarnessService:
                 payload["duration_ms"] = event.get("duration_ms", 0)
             elif evt_type == "system":
                 payload["subtype"] = event.get("subtype", "")
-                payload["session_id"] = event.get("session_id", "")
+                sid = event.get("session_id", "")
+                payload["session_id"] = sid
+                # Persist session_id on the topic state so the next phase can resume it
+                if sid:
+                    with self._lock:
+                        current = self.store.get_topic(tid)
+                        if current is not None:
+                            current.session_id = sid
+                            current.updated_at = utc_now()
+                            self.workspace.save_state(current)
+                            self.store.upsert_topic(current)
             else:
                 # Skip rate_limit_event, etc.
                 return
@@ -462,11 +472,17 @@ class HarnessService:
         import sys
         try:
             stream_cb = self._make_stream_callback(topic_id)
+            # Start feedback poller during session
+            stop_poll = threading.Event()
+            poller = self._start_feedback_poller(topic_id, state.workspace_path, stop_poll)
             self.planner.run_clarification(
                 state, project_context,
                 on_stream=stream_cb,
                 project_path=state.project,
             )
+            stop_poll.set()
+            poller.join(timeout=2.0)
+            self._poll_agent_feedback(topic_id, state.workspace_path)  # final sweep
 
             # After Claude session ends, check if requirement.md was written
             with self._lock:
@@ -522,13 +538,21 @@ class HarnessService:
                 documents = self.workspace.load_documents(topic_id, project=proj)
                 requirement_md = documents.get("requirement.md", "")
 
+            resume_sid = state.session_id  # resume from clarification session
             stream_cb = self._make_stream_callback(topic_id)
+            # Start feedback poller during session
+            stop_poll = threading.Event()
+            poller = self._start_feedback_poller(topic_id, state.workspace_path, stop_poll)
             self.planner.run_planning(
                 state, requirement_md, project_context,
                 on_stream=stream_cb,
                 project_path=state.project,
                 revision_note=revision_note,
+                resume_session_id=resume_sid,
             )
+            stop_poll.set()
+            poller.join(timeout=2.0)
+            self._poll_agent_feedback(topic_id, state.workspace_path)  # final sweep
 
             # After Claude session ends, present plan confirmation gate
             with self._lock:
@@ -679,6 +703,11 @@ class HarnessService:
             context: Dict[str, Any] = {}
             # Tell the agent where to write its structured report
             state_ctx = self.store.get_topic(topic_id)
+            # Pass session_id from planning phase so execution can resume it
+            if state_ctx and state_ctx.session_id:
+                context["resume_session_id"] = state_ctx.session_id
+            # Pass stream callback for real-time streaming during execution
+            context["on_stream"] = self._make_stream_callback(topic_id)
             report_dir = self.workspace.topic_dir(topic_id, project=state_ctx.project if state_ctx else None) / f"artifacts/{run_id}"
             report_dir.mkdir(parents=True, exist_ok=True)
             context["report_path"] = str(report_dir / "report.md")
@@ -692,7 +721,14 @@ class HarnessService:
                     if offload_context:
                         context["project_context"] = offload_context
             # topic_dir now routes to per-repo location
-            result = executor.execute(self.workspace.topic_dir(topic_id, project=state_ctx.project if state_ctx else None), command=command or None, context=context)
+            topic_dir = self.workspace.topic_dir(topic_id, project=state_ctx.project if state_ctx else None)
+            # Start feedback poller during execution
+            stop_poll = threading.Event()
+            poller = self._start_feedback_poller(topic_id, str(topic_dir), stop_poll)
+            result = executor.execute(topic_dir, command=command or None, context=context)
+            stop_poll.set()
+            poller.join(timeout=2.0)
+            self._poll_agent_feedback(topic_id, str(topic_dir))  # final sweep
 
             with self._lock:
                 state = self._require_topic(topic_id)
@@ -747,6 +783,66 @@ class HarnessService:
         finally:
             with self._lock:
                 self._run_threads.pop(run_id, None)
+
+    # ---- Agent-initiated feedback polling -------------------------------------
+
+    def _poll_agent_feedback(self, topic_id: str, topic_dir: str) -> None:
+        """Check for feedback request files written by the spawned Claude agent.
+
+        Convention: agent writes JSON to .offload/topics/<id>/feedback/pending/<request-id>.json
+        with fields: title, prompt, options (list), type (default "choose_one").
+        Processed files are moved to feedback/processed/ to avoid re-processing.
+        """
+        import shutil
+        pending_dir = Path(topic_dir) / "feedback" / "pending"
+        if not pending_dir.is_dir():
+            return
+        processed_dir = Path(topic_dir) / "feedback" / "processed"
+
+        for fp in sorted(pending_dir.glob("*.json")):
+            try:
+                payload = json.loads(fp.read_text())
+                req_id = fp.stem  # filename without .json
+                req_type_str = payload.get("type", "choose_one")
+                try:
+                    req_type = FeedbackRequestType(req_type_str)
+                except ValueError:
+                    req_type = FeedbackRequestType.CHOOSE_ONE
+
+                feedback_req = FeedbackRequest(
+                    request_id=req_id if req_id.startswith("fr-") else f"fr-{req_id}",
+                    topic_id=topic_id,
+                    request_type=req_type,
+                    title=payload.get("title", "Agent question"),
+                    prompt=payload.get("prompt", ""),
+                    options=list(payload.get("options", [])),
+                )
+
+                with self._lock:
+                    state = self.store.get_topic(topic_id)
+                    if state is None:
+                        continue
+                    proj = state.project
+                    self.workspace.save_feedback_request(feedback_req, project=proj)
+                    self.store.upsert_feedback_request(feedback_req)
+                    self._publish_feedback_requested(feedback_req)
+
+                # Move to processed
+                processed_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(fp), str(processed_dir / fp.name))
+            except Exception:
+                import sys, traceback
+                traceback.print_exc(file=sys.stderr)
+
+    def _start_feedback_poller(self, topic_id: str, topic_dir: str, stop_event: threading.Event) -> threading.Thread:
+        """Start a background thread that polls feedback/pending/ every 5s while a session is active."""
+        def _poll_loop():
+            while not stop_event.is_set():
+                self._poll_agent_feedback(topic_id, topic_dir)
+                stop_event.wait(5.0)
+        t = threading.Thread(target=_poll_loop, daemon=True)
+        t.start()
+        return t
 
     # ---- Helpers -------------------------------------------------------------
 
