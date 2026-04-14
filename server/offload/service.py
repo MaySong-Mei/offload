@@ -429,36 +429,43 @@ class HarnessService:
         return ctx if ctx else None
 
     def _make_stream_callback(self, topic_id: str) -> callable:
-        """Create a callback that streams agent output to iOS via events."""
-        conversation_lines: list = []
+        """Create a callback that forwards Claude stream-json events to iOS via WebSocket."""
+        def _on_stream(tid: str, stage: str, event: dict) -> None:
+            # Simplify the event for iOS — extract the useful parts
+            evt_type = event.get("type", "")
+            payload: dict = {"stage": stage, "claude_event_type": evt_type}
 
-        def _on_stream(tid: str, stage: str, chunk: str) -> None:
-            conversation_lines.append(chunk)
-            event = self._record_event(
+            if evt_type == "assistant":
+                # Extract text and tool_use from message content
+                msg = event.get("message", {})
+                contents = msg.get("content", [])
+                for c in contents:
+                    ct = c.get("type", "")
+                    if ct == "text":
+                        payload["text"] = c["text"]
+                    elif ct == "tool_use":
+                        payload["tool_name"] = c.get("name", "")
+                        payload["tool_input"] = json.dumps(c.get("input", {}))[:500]
+            elif evt_type == "tool_result":
+                payload["tool_result"] = str(event.get("content", ""))[:500]
+            elif evt_type == "result":
+                payload["result"] = event.get("result", "")[:500]
+                payload["duration_ms"] = event.get("duration_ms", 0)
+            elif evt_type == "system":
+                payload["subtype"] = event.get("subtype", "")
+                payload["session_id"] = event.get("session_id", "")
+            else:
+                # Skip rate_limit_event, etc.
+                return
+
+            ws_event = self._record_event(
                 "agent.stream",
                 topic_id=tid,
-                payload={"stage": stage, "text": chunk.rstrip("\n")},
+                payload=payload,
             )
-            self.event_bus.publish(event)
+            self.event_bus.publish(ws_event)
 
-        _on_stream._lines = conversation_lines
         return _on_stream
-
-    def _save_conversation(self, topic_id: str, stage: str, lines: list) -> None:
-        """Save collected agent output as conversation.md in the topic workspace."""
-        state = self.store.get_topic(topic_id)
-        if state is None:
-            return
-        proj = state.project
-        text = "".join(lines)
-        # Append to conversation.md
-        conv_path = Path(self.workspace.topic_dir(topic_id, project=proj)) / "conversation.md"
-        header = f"\n\n---\n\n## {stage} ({utc_now()})\n\n"
-        try:
-            existing = conv_path.read_text() if conv_path.is_file() else "# Agent Conversation\n"
-            conv_path.write_text(existing + header + text)
-        except OSError:
-            pass
 
     def _generate_clarification(self, topic_id: str, state: TopicState, project_context: Optional[Dict[str, str]]) -> None:
         """Background thread: call Claude to generate clarifying questions, then publish as feedback requests."""
@@ -466,7 +473,7 @@ class HarnessService:
         try:
             stream_cb = self._make_stream_callback(topic_id)
             questions = self.planner.generate_clarifying_questions(state, project_context, on_stream=stream_cb, project_path=state.project)
-            self._save_conversation(topic_id, "clarification", stream_cb._lines)
+            # Conversation is streamed to iOS in real-time, not stored separately
             with self._lock:
                 current = self.store.get_topic(topic_id)
                 if current is None:
@@ -524,7 +531,7 @@ class HarnessService:
             # Call Claude outside lock (with streaming)
             stream_cb = self._make_stream_callback(topic_id)
             plan_md = self.planner.generate_plan_doc(state, requirement_md, project_context, on_stream=stream_cb, project_path=state.project)
-            self._save_conversation(topic_id, "planning", stream_cb._lines)
+            # Streamed to iOS in real-time
 
             with self._lock:
                 state = self.store.get_topic(topic_id)
@@ -587,7 +594,7 @@ class HarnessService:
             project_context = self._load_project_context(state.project)
             stream_cb = self._make_stream_callback(topic_id)
             requirement_md = self.planner.generate_requirement_doc(state, feedback_history, project_context, on_stream=stream_cb, project_path=state.project)
-            self._save_conversation(topic_id, "requirement", stream_cb._lines)
+            # Streamed to iOS in real-time
 
             if requirement_md:
                 with self._lock:

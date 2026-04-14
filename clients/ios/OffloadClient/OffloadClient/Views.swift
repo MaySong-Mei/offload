@@ -2199,7 +2199,7 @@ private struct TopicDetailView: View {
     }
 
     // Live stream lines for this topic
-    private var streamLines: [AgentStreamLine] {
+    private var streamEvents: [AgentStreamEvent] {
         model.agentConversation.filter { $0.topicId == detail.topic.topicId }
     }
 
@@ -2221,6 +2221,13 @@ private struct TopicDetailView: View {
                         }
                     }
                     .padding(.bottom, 16)
+
+                    // Live agent session (clarification stage)
+                    let clarifyStream = streamEvents.filter { $0.stage == "clarification" && $0.claudeEventType != "system" }
+                    if !clarifyStream.isEmpty && pendingFeedback.isEmpty && resolvedFeedback.isEmpty {
+                        sectionDivider("Agent", subtitle: "analyzing")
+                        claudeSessionBlock(events: clarifyStream)
+                    }
 
                     // Resolved feedback (past Q&A)
                     ForEach(resolvedFeedback) { request in
@@ -2248,10 +2255,10 @@ private struct TopicDetailView: View {
                     }
 
                     // Streaming output (requirement/plan — not clarification which is JSON)
-                    let reqStream = streamLines.filter { $0.stage == "requirement" }
+                    let reqStream = streamEvents.filter { $0.stage == "requirement" }
                     if !reqStream.isEmpty {
                         sectionDivider("Agent", subtitle: "generating requirement")
-                        agentStreamBlock(lines: reqStream)
+                        claudeSessionBlock(events: reqStream)
                     }
 
                     // Requirement document
@@ -2272,10 +2279,10 @@ private struct TopicDetailView: View {
                     }
 
                     // Streaming output (plan)
-                    let planStream = streamLines.filter { $0.stage == "planning" }
+                    let planStream = streamEvents.filter { $0.stage == "planning" }
                     if !planStream.isEmpty {
                         sectionDivider("Agent", subtitle: "generating plan")
-                        agentStreamBlock(lines: planStream)
+                        claudeSessionBlock(events: planStream)
                     }
 
                     // Plan document
@@ -2368,15 +2375,69 @@ private struct TopicDetailView: View {
     }
 
     @ViewBuilder
-    private func agentStreamBlock(lines: [AgentStreamLine]) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            ForEach(lines.suffix(20)) { line in
-                Text(line.text)
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
+    private func claudeSessionBlock(events: [AgentStreamEvent]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(events.suffix(30)) { event in
+                switch event.claudeEventType {
+                case "assistant":
+                    if let text = event.text, !text.isEmpty {
+                        Text(text)
+                            .font(.subheadline)
+                            .foregroundStyle(.primary)
+                            .textSelection(.enabled)
+                    }
+                    if let tool = event.toolName {
+                        HStack(spacing: 6) {
+                            Image(systemName: toolIcon(tool))
+                                .font(.caption2)
+                                .foregroundStyle(.teal)
+                            Text(tool)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.teal)
+                            if let input = event.toolInput, !input.isEmpty {
+                                Text(input)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .padding(.vertical, 3)
+                        .padding(.horizontal, 8)
+                        .background(Color.teal.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                    }
+                case "tool_result":
+                    if let result = event.toolResult, !result.isEmpty {
+                        Text(result)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(4)
+                            .padding(.leading, 12)
+                    }
+                case "result":
+                    if let result = event.result, !result.isEmpty {
+                        Divider()
+                        Text(result)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(5)
+                    }
+                default:
+                    EmptyView()
+                }
             }
         }
         .padding(.bottom, 12)
+    }
+
+    private func toolIcon(_ name: String) -> String {
+        switch name {
+        case "Read": return "doc.text"
+        case "Glob": return "magnifyingglass"
+        case "Grep": return "text.magnifyingglass"
+        case "Bash": return "terminal"
+        case "Edit", "Write": return "pencil"
+        default: return "wrench"
+        }
     }
 
     @ViewBuilder

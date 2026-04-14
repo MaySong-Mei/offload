@@ -28,7 +28,7 @@ final class AppModel: ObservableObject {
     @Published var isCheckingAgents = false
     @Published var sensors: [SensorModel] = []
     @Published var signals: [SignalModel] = []
-    @Published var agentConversation: [AgentStreamLine] = []
+    @Published var agentConversation: [AgentStreamEvent] = []
 
     // Combined list: server-discovered projects + projects referenced by topics + ungrouped slot
     var allProjectGroups: [(key: String, name: String, hasReadme: Bool, topicCount: Int)] {
@@ -593,15 +593,21 @@ final class AppModel: ObservableObject {
                         }
                         continue
                     }
-                    // Agent streaming output → append to conversation
+                    // Agent streaming output → append structured event to conversation
                     if event.eventType == "agent.stream" {
-                        if let tid = event.topicId,
-                           let text = event.payload?["text"]?.value {
-                            let stage = event.payload?["stage"]?.value ?? ""
-                            self.agentConversation.append(AgentStreamLine(
-                                topicId: tid, stage: stage, text: text
-                            ))
-                            // Keep buffer reasonable
+                        if let tid = event.topicId {
+                            let p = event.payload
+                            let streamEvent = AgentStreamEvent(
+                                topicId: tid,
+                                stage: p?["stage"]?.value ?? "",
+                                claudeEventType: p?["claude_event_type"]?.value ?? "",
+                                text: p?["text"]?.value,
+                                toolName: p?["tool_name"]?.value,
+                                toolInput: p?["tool_input"]?.value,
+                                toolResult: p?["tool_result"]?.value,
+                                result: p?["result"]?.value
+                            )
+                            self.agentConversation.append(streamEvent)
                             if self.agentConversation.count > 500 {
                                 self.agentConversation.removeFirst(self.agentConversation.count - 500)
                             }

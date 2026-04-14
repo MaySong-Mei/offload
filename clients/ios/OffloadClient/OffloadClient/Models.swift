@@ -212,11 +212,16 @@ struct RecentCommit: Codable, Identifiable {
     var id: String { hash }
 }
 
-struct AgentStreamLine: Identifiable {
+struct AgentStreamEvent: Identifiable {
     let id = UUID()
     let topicId: String
     let stage: String
-    let text: String
+    let claudeEventType: String   // "assistant", "tool_result", "result", "system"
+    let text: String?             // assistant text output
+    let toolName: String?         // tool_use name (e.g. "Read", "Glob")
+    let toolInput: String?        // tool input (truncated)
+    let toolResult: String?       // tool result (truncated)
+    let result: String?           // final result text
     let timestamp = Date()
 }
 

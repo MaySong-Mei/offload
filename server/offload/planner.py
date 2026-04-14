@@ -9,8 +9,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .models import FeedbackRequest, FeedbackRequestType, TopicState
 
-# Callback type: (topic_id, stage, chunk_text) -> None
-StreamCallback = Optional[Callable[[str, str, str], None]]
+# Callback type: (topic_id, stage, event_dict) -> None
+# event_dict is a parsed stream-json event from Claude CLI
+StreamCallback = Optional[Callable[[str, str, Dict[str, Any]], None]]
 
 
 class TopicPlanner:
@@ -300,30 +301,43 @@ Write ONLY the markdown document, no preamble."""
         on_stream: StreamCallback = None,
         cwd: Optional[str] = None,
     ) -> Optional[str]:
-        """Call Claude CLI and stream output line-by-line via callback.
+        """Call Claude CLI with stream-json output and push structured events.
 
-        If on_stream is provided, each line of stdout is pushed in real-time
-        as an event to the iOS client. The full output is still returned.
-        If cwd is set, Claude runs in that directory with file access.
+        Uses --output-format stream-json --verbose to get full session events
+        (text, tool_use, tool_result, etc.). Each event is forwarded to iOS
+        via the on_stream callback. The final text result is returned.
         """
         try:
             proc = subprocess.Popen(
-                ["claude", "-p", prompt, "--output-format", "text"],
+                ["claude", "-p", prompt, "--output-format", "stream-json",
+                 "--verbose", "--dangerously-skip-permissions"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 cwd=cwd,
             )
-            collected: list[str] = []
+            result_text = None
             for line in proc.stdout:
-                collected.append(line)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                # Push every event to iOS
                 if on_stream and topic_id:
-                    on_stream(topic_id, stage, line)
+                    on_stream(topic_id, stage, event)
+
+                # Extract the final result text
+                if event.get("type") == "result":
+                    result_text = event.get("result", "")
+
             proc.wait(timeout=timeout)
-            full_text = "".join(collected).strip()
-            if proc.returncode == 0 and full_text:
-                return full_text
-            return None
+            if proc.returncode == 0 and result_text:
+                return result_text.strip()
+            return result_text.strip() if result_text else None
         except FileNotFoundError:
             return None
         except subprocess.TimeoutExpired:
