@@ -2370,7 +2370,9 @@ private struct TopicDetailView: View {
             ForEach(events.suffix(30)) { event in
                 switch event.claudeEventType {
                 case "assistant":
-                    if let text = event.text, !text.isEmpty {
+                    if let text = event.text, !text.isEmpty,
+                       !text.trimmingCharacters(in: .whitespaces).hasPrefix("[{"),
+                       !text.trimmingCharacters(in: .whitespaces).hasPrefix("{\"") {
                         Text(text)
                             .font(.subheadline)
                             .foregroundStyle(.primary)
@@ -2404,7 +2406,10 @@ private struct TopicDetailView: View {
                             .padding(.leading, 12)
                     }
                 case "result":
-                    if let result = event.result, !result.isEmpty {
+                    // Result is the final output — only show if it's human-readable (not JSON)
+                    if let result = event.result, !result.isEmpty,
+                       !result.trimmingCharacters(in: .whitespaces).hasPrefix("[{"),
+                       !result.trimmingCharacters(in: .whitespaces).hasPrefix("{\"") {
                         Divider()
                         Text(result)
                             .font(.caption)
