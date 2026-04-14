@@ -78,6 +78,7 @@ class TopicPlanner:
         state: TopicState,
         project_context: Optional[Dict[str, str]] = None,
         on_stream: StreamCallback = None,
+        project_path: Optional[str] = None,
     ) -> List[FeedbackRequest]:
         """Use Claude to analyze the raw input and generate clarifying questions.
 
@@ -94,41 +95,26 @@ class TopicPlanner:
             if parts:
                 context_block = "Project context:\n" + "\n\n".join(parts)
 
-        prompt = f"""You are a requirements analyst for a software project. A user has submitted a task request. Your job is to generate 1-3 clarifying questions to ensure the requirement is well-defined before implementation.
+        prompt = f"""You are a requirements analyst for a software project. A user has submitted a task request from their phone. You are running inside the project directory and CAN read files to understand the current state.
 
 {context_block}
 
 User's request: "{state.raw_input}"
 
-Respond with a JSON array of questions. Each question must have:
-- "title": short question title (shown as section header)
-- "prompt": the full question text
-- "options": array of 2-4 concrete answer choices (the user will tap one)
-- "allow_note": true if the user might want to add a free-text note
+IMPORTANT: Before generating questions, READ the relevant project files to understand the current state. For example, if the user mentions version numbers, read the actual config files to find current values. Use specific, concrete information from the codebase in your questions and options.
 
-Example output:
-[
-  {{
-    "title": "Version scope",
-    "prompt": "Which version number do you want to change?",
-    "options": ["Marketing version (e.g. 1.2.0)", "Build number only", "Both"],
-    "allow_note": true
-  }},
-  {{
-    "title": "Increment type",
-    "prompt": "What kind of version bump?",
-    "options": ["Patch (1.0.x)", "Minor (1.x.0)", "Major (x.0.0)", "Custom value"],
-    "allow_note": true
-  }}
-]
+Respond with a JSON array of 1-3 clarifying questions. Each question must have:
+- "title": short question title (shown as section header on phone)
+- "prompt": the full question text (include current values you found in files)
+- "options": array of 2-4 concrete answer choices the user can tap
+- "allow_note": boolean, true if the user might want to type additional context
 
 Rules:
-- Options should be concrete choices the user can tap, NOT generic ("yes"/"no") unless appropriate
-- Each question should clarify a real ambiguity in the request
+- Options must be concrete and specific (include actual values from the codebase)
 - If the request is already perfectly clear, return a single confirmation question
-- Return ONLY valid JSON, no markdown fencing"""
+- Return ONLY valid JSON array, no markdown fencing, no explanation before/after"""
 
-        questions = self._call_claude(prompt, topic_id=state.topic_id, stage="clarification", on_stream=on_stream)
+        questions = self._call_claude(prompt, topic_id=state.topic_id, stage="clarification", on_stream=on_stream, cwd=project_path)
         if questions is None:
             # Fallback: generic confirmation
             return [self._fallback_requirement_request(state.topic_id)]
@@ -153,6 +139,7 @@ Rules:
         feedback_history: List[Dict[str, Any]],
         project_context: Optional[Dict[str, str]] = None,
         on_stream: StreamCallback = None,
+        project_path: Optional[str] = None,
     ) -> Optional[str]:
         """Use Claude to write a structured requirement based on the user's input + feedback answers."""
         context_block = ""
@@ -200,7 +187,7 @@ Any implementation hints based on the project context.
 
 Be concise and specific. Write ONLY the markdown document, no preamble."""
 
-        result = self._call_claude_text(prompt, topic_id=state.topic_id, stage="requirement", on_stream=on_stream)
+        result = self._call_claude_text(prompt, topic_id=state.topic_id, stage="requirement", on_stream=on_stream, cwd=project_path)
         return result
 
     def generate_plan_doc(
@@ -209,6 +196,7 @@ Be concise and specific. Write ONLY the markdown document, no preamble."""
         requirement_md: str,
         project_context: Optional[Dict[str, str]] = None,
         on_stream: StreamCallback = None,
+        project_path: Optional[str] = None,
     ) -> Optional[str]:
         """Use Claude to generate an implementation plan based on the approved requirement."""
         context_block = ""
@@ -249,7 +237,7 @@ One paragraph describing the strategy.
 Be specific and actionable. An agent will follow this plan to implement the changes.
 Write ONLY the markdown document, no preamble."""
 
-        result = self._call_claude_text(prompt, topic_id=state.topic_id, stage="planning", on_stream=on_stream)
+        result = self._call_claude_text(prompt, topic_id=state.topic_id, stage="planning", on_stream=on_stream, cwd=project_path)
         return result
 
     # --- Feedback request constructors ---
@@ -284,9 +272,10 @@ Write ONLY the markdown document, no preamble."""
         topic_id: str = "",
         stage: str = "",
         on_stream: StreamCallback = None,
+        cwd: Optional[str] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """Call Claude CLI and parse JSON array response."""
-        text = self._call_claude_text(prompt, topic_id=topic_id, stage=stage, on_stream=on_stream)
+        text = self._call_claude_text(prompt, topic_id=topic_id, stage=stage, on_stream=on_stream, cwd=cwd)
         if text is None:
             return None
         # Strip markdown code fences if present
@@ -305,15 +294,17 @@ Write ONLY the markdown document, no preamble."""
     @staticmethod
     def _call_claude_text(
         prompt: str,
-        timeout: int = 60,
+        timeout: int = 120,
         topic_id: str = "",
         stage: str = "",
         on_stream: StreamCallback = None,
+        cwd: Optional[str] = None,
     ) -> Optional[str]:
         """Call Claude CLI and stream output line-by-line via callback.
 
         If on_stream is provided, each line of stdout is pushed in real-time
         as an event to the iOS client. The full output is still returned.
+        If cwd is set, Claude runs in that directory with file access.
         """
         try:
             proc = subprocess.Popen(
@@ -321,6 +312,7 @@ Write ONLY the markdown document, no preamble."""
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                cwd=cwd,
             )
             collected: list[str] = []
             for line in proc.stdout:

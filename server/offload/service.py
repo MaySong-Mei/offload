@@ -465,7 +465,7 @@ class HarnessService:
         import sys
         try:
             stream_cb = self._make_stream_callback(topic_id)
-            questions = self.planner.generate_clarifying_questions(state, project_context, on_stream=stream_cb)
+            questions = self.planner.generate_clarifying_questions(state, project_context, on_stream=stream_cb, project_path=state.project)
             self._save_conversation(topic_id, "clarification", stream_cb._lines)
             with self._lock:
                 current = self.store.get_topic(topic_id)
@@ -523,7 +523,7 @@ class HarnessService:
 
             # Call Claude outside lock (with streaming)
             stream_cb = self._make_stream_callback(topic_id)
-            plan_md = self.planner.generate_plan_doc(state, requirement_md, project_context, on_stream=stream_cb)
+            plan_md = self.planner.generate_plan_doc(state, requirement_md, project_context, on_stream=stream_cb, project_path=state.project)
             self._save_conversation(topic_id, "planning", stream_cb._lines)
 
             with self._lock:
@@ -586,7 +586,7 @@ class HarnessService:
 
             project_context = self._load_project_context(state.project)
             stream_cb = self._make_stream_callback(topic_id)
-            requirement_md = self.planner.generate_requirement_doc(state, feedback_history, project_context, on_stream=stream_cb)
+            requirement_md = self.planner.generate_requirement_doc(state, feedback_history, project_context, on_stream=stream_cb, project_path=state.project)
             self._save_conversation(topic_id, "requirement", stream_cb._lines)
 
             if requirement_md:
