@@ -2222,11 +2222,11 @@ private struct TopicDetailView: View {
                     }
                     .padding(.bottom, 16)
 
-                    // Live agent session (clarification stage)
-                    let clarifyStream = streamEvents.filter { $0.stage == "clarification" && $0.claudeEventType != "system" }
-                    if !clarifyStream.isEmpty && pendingFeedback.isEmpty && resolvedFeedback.isEmpty {
-                        sectionDivider("Agent", subtitle: "analyzing")
-                        claudeSessionBlock(events: clarifyStream)
+                    // Live agent session (all stages — always visible as history)
+                    let allStream = streamEvents.filter { $0.claudeEventType != "system" }
+                    if !allStream.isEmpty {
+                        sectionDivider("Agent", subtitle: allStream.last?.stage ?? "")
+                        claudeSessionBlock(events: allStream)
                     }
 
                     // Resolved feedback (past Q&A)
@@ -2254,12 +2254,7 @@ private struct TopicDetailView: View {
                             .padding(.bottom, 16)
                     }
 
-                    // Streaming output (requirement/plan — not clarification which is JSON)
-                    let reqStream = streamEvents.filter { $0.stage == "requirement" }
-                    if !reqStream.isEmpty {
-                        sectionDivider("Agent", subtitle: "generating requirement")
-                        claudeSessionBlock(events: reqStream)
-                    }
+                    // Requirement stage (stream already shown above)
 
                     // Requirement document
                     if let req = detail.documents["requirement.md"],
@@ -2278,12 +2273,7 @@ private struct TopicDetailView: View {
                             .padding(.bottom, 16)
                     }
 
-                    // Streaming output (plan)
-                    let planStream = streamEvents.filter { $0.stage == "planning" }
-                    if !planStream.isEmpty {
-                        sectionDivider("Agent", subtitle: "generating plan")
-                        claudeSessionBlock(events: planStream)
-                    }
+                    // Plan stage (stream already shown above)
 
                     // Plan document
                     if let plan = detail.documents["plan.md"],
