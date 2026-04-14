@@ -333,44 +333,13 @@ private struct ProjectDashboardView: View {
         return model.projects.first { $0.path == key }
     }
 
-    // --- Outer loop: items needing human action ---
-
-    private var needsRequirementApproval: [TopicSummary] {
-        topics.filter { $0.requirementState == .specified && $0.requirementApprovedAt == nil }
-    }
-
-    private var needsPlanApproval: [TopicSummary] {
-        topics.filter { $0.requirementApprovedAt != nil && $0.planApprovedAt == nil && $0.executionState == .idle }
-    }
-
-    private var needsHumanTesting: [TopicSummary] {
-        topics.filter { $0.executionState == .humanTesting }
-    }
-
-    private var failedTopics: [TopicSummary] {
-        topics.filter { $0.executionState == .failed }
-    }
-
-    private var pendingFeedback: [FeedbackRequestModel] {
-        let topicIds = Set(topics.map(\.topicId))
-        return model.feedbackQueue.filter { topicIds.contains($0.topicId) }
-    }
-
-    private var actionRequiredCount: Int {
-        needsRequirementApproval.count + needsPlanApproval.count + needsHumanTesting.count + failedTopics.count + pendingFeedback.count
-    }
-
-    // --- Inner loop: agent activity ---
+    // --- Agent activity (used by meta card) ---
 
     private var implementingTopics: [TopicSummary] {
         topics.filter { $0.executionState == .implementing || $0.executionState == .queued }
     }
 
-    private var recentlyCompleted: [TopicSummary] {
-        topics.filter { $0.executionState == .implemented || $0.executionState == .passed }
-    }
-
-    // --- Pipeline ---
+    // --- Pipeline (used by meta card) ---
 
     private var pipelineCounts: [(label: String, state: String, count: Int, color: Color)] {
         let states: [(String, String, Color)] = [
@@ -406,7 +375,11 @@ private struct ProjectDashboardView: View {
                     NavigationLink {
                         ProjectDetailView(model: model, activity: activity, readmeContent: readmeContent)
                     } label: {
-                        ProjectMetaCard(activity: activity)
+                        ProjectMetaCard(
+                            activity: activity,
+                            pipelineCounts: pipelineCounts.map { ($0.label, $0.count, $0.color) },
+                            implementingCount: implementingTopics.count
+                        )
                     }
                 }
             }
@@ -428,16 +401,7 @@ private struct ProjectDashboardView: View {
                 }
             }
 
-            // Section 2: Agent Activity
-            if !implementingTopics.isEmpty || !recentlyCompleted.isEmpty {
-                Section {
-                    agentActivitySection
-                } header: {
-                    Label("Agent Activity", systemImage: "cpu")
-                }
-            }
-
-            // Section 3: All Topics
+            // All Topics
             Section {
                 if topics.isEmpty {
                     HStack {
@@ -521,146 +485,6 @@ private struct ProjectDashboardView: View {
         }
     }
 
-    // MARK: Section 1 — Action Required
-
-    @ViewBuilder
-    private var actionRequiredSection: some View {
-        ForEach(pendingFeedback) { fb in
-            ActionCard(
-                icon: "bubble.left.fill",
-                color: .orange,
-                title: fb.title,
-                subtitle: "Feedback requested for topic"
-            ) {
-                model.selectTopic(fb.topicId)
-            }
-        }
-        ForEach(needsRequirementApproval) { topic in
-            ActionCard(
-                icon: "checkmark.circle",
-                color: .blue,
-                title: topic.title,
-                subtitle: "Requirement ready for approval"
-            ) {
-                model.selectTopic(topic.topicId)
-            } action: {
-                Task { await model.selectAndApproveRequirement(topic.topicId) }
-            } actionLabel: {
-                Label("Approve", systemImage: "checkmark")
-            }
-        }
-        ForEach(needsPlanApproval) { topic in
-            ActionCard(
-                icon: "map",
-                color: .teal,
-                title: topic.title,
-                subtitle: "Plan ready for approval"
-            ) {
-                model.selectTopic(topic.topicId)
-            } action: {
-                Task { await model.selectAndApprovePlan(topic.topicId) }
-            } actionLabel: {
-                Label("Approve", systemImage: "checkmark")
-            }
-        }
-        ForEach(needsHumanTesting) { topic in
-            ActionCard(
-                icon: "person.fill.checkmark",
-                color: .purple,
-                title: topic.title,
-                subtitle: "Ready for human testing"
-            ) {
-                model.selectTopic(topic.topicId)
-            }
-        }
-        ForEach(failedTopics) { topic in
-            ActionCard(
-                icon: "xmark.circle.fill",
-                color: .red,
-                title: topic.title,
-                subtitle: "Run failed — needs attention"
-            ) {
-                model.selectTopic(topic.topicId)
-            }
-        }
-    }
-
-    // MARK: Section 2 — Agent Activity
-
-    @ViewBuilder
-    private var agentActivitySection: some View {
-        ForEach(implementingTopics) { topic in
-            HStack(spacing: 10) {
-                ProgressView()
-                    .controlSize(.small)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(topic.title)
-                        .font(.subheadline.weight(.medium))
-                    Text("Agent is working…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .tag(topic.topicId)
-        }
-        ForEach(recentlyCompleted.prefix(3)) { topic in
-            HStack(spacing: 10) {
-                Image(systemName: topic.executionState == .passed ? "checkmark.circle.fill" : "hammer.fill")
-                    .foregroundStyle(topic.executionState == .passed ? .green : .teal)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(topic.title)
-                        .font(.subheadline.weight(.medium))
-                    Text(topic.executionState == .passed ? "Passed" : "Implemented")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .tag(topic.topicId)
-        }
-    }
-
-    // MARK: Section 3 — Pipeline
-
-    private var pipelineSection: some View {
-        let active = pipelineCounts.filter { $0.count > 0 }
-        return Group {
-            if active.isEmpty {
-                HStack {
-                    Spacer()
-                    VStack(spacing: 4) {
-                        Image(systemName: "arrow.right.arrow.left")
-                            .font(.title3)
-                            .foregroundStyle(.quaternary)
-                        Text("No topics in pipeline yet")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                    .padding(.vertical, 8)
-                    Spacer()
-                }
-            } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(active, id: \.state) { item in
-                            VStack(spacing: 3) {
-                                Text("\(item.count)")
-                                    .font(.title3.weight(.bold))
-                                    .foregroundStyle(item.color)
-                                Text(item.label)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .frame(minWidth: 50)
-                            .padding(.vertical, 8)
-                            .padding(.horizontal, 4)
-                            .background(item.color.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-        }
-    }
 
     // MARK: Recent Changes
 
@@ -893,6 +717,8 @@ private struct NewSensorSheet: View {
 
 private struct ProjectMetaCard: View {
     let activity: ProjectActivityResponse
+    var pipelineCounts: [(label: String, count: Int, color: Color)] = []
+    var implementingCount: Int = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -924,6 +750,37 @@ private struct ProjectMetaCard: View {
                 StatBadge(label: "Archived", value: activity.meta.topicStats.archived, color: .secondary)
             }
             .padding(.vertical, 4)
+
+            // Pipeline dots
+            let activePipeline = pipelineCounts.filter { $0.count > 0 }
+            if !activePipeline.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(activePipeline, id: \.label) { item in
+                        HStack(spacing: 3) {
+                            Circle()
+                                .fill(item.color)
+                                .frame(width: 8, height: 8)
+                            Text("\(item.count)")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(item.color)
+                            Text(item.label)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
+            // Agent activity indicator
+            if implementingCount > 0 {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("\(implementingCount) topic\(implementingCount == 1 ? "" : "s") building…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
 
             // Architecture excerpt
             if let arch = activity.meta.architectureExcerpt, !arch.isEmpty {
@@ -2013,9 +1870,22 @@ private struct TopicRow: View {
 
     private var isLocal: Bool { topic.topicId.hasPrefix("local-") }
 
+    private var needsAttention: Bool {
+        topic.executionState == .failed
+            || topic.executionState == .humanTesting
+            || (topic.requirementState == .specified && topic.requirementApprovedAt == nil)
+            || (topic.requirementApprovedAt != nil && topic.planApprovedAt == nil && topic.executionState == .idle)
+            || topic.pendingFeedbackRequestId != nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
+                if needsAttention {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.caption)
+                }
                 Text(topic.title)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
