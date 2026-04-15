@@ -1929,6 +1929,10 @@ private struct TopicRow: View {
                 if topic.decisionState != .none {
                     StatusChip(text: topic.decisionState.rawValue, category: .decision)
                 }
+                Spacer()
+                Text(_relativeTime(topic.updatedAt))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
         }
         .padding(.vertical, 2)

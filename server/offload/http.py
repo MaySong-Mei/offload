@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .projects import ProjectScanner
 from .repo_offload import InitRunner, RepoOffload
-from .service import HarnessService, NotFoundError, ValidationError
+from .service import GateTimeoutError, HarnessService, NotFoundError, ValidationError
 
 
 class AuthConfig:
@@ -359,11 +359,29 @@ def make_handler():
                 if topic_id and parsed.path == f"/topics/{topic_id}/archive":
                     self._write_json(HTTPStatus.OK, self.server.service.archive_topic(topic_id))
                     return
+                if topic_id and parsed.path == f"/topics/{topic_id}/run-to-gate":
+                    gate = payload.get("gate", "")
+                    if not gate:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'gate' field"})
+                        return
+                    timeout = float(payload.get("timeout", 600))
+                    detail = self.server.service.wait_for_gate(topic_id, gate, timeout)
+                    self._write_json(HTTPStatus.OK, detail)
+                    return
+                if topic_id and parsed.path == f"/topics/{topic_id}/execute-and-wait":
+                    executor = payload.get("executor", "claude")
+                    command = payload.get("command", [])
+                    timeout = float(payload.get("timeout", 600))
+                    detail = self.server.service.execute_and_wait(topic_id, executor, command, timeout)
+                    self._write_json(HTTPStatus.OK, detail)
+                    return
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             except NotFoundError as error:
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
             except ValidationError as error:
                 self._write_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(error)})
+            except GateTimeoutError as error:
+                self._write_json(HTTPStatus.REQUEST_TIMEOUT, {"error": str(error)})
             except KeyError as error:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"Missing field: {error.args[0]}"})
 

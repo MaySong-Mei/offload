@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import queue
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -34,6 +36,10 @@ class NotFoundError(Exception):
 
 
 class ValidationError(Exception):
+    pass
+
+
+class GateTimeoutError(Exception):
     pass
 
 
@@ -399,6 +405,90 @@ class HarnessService:
             self.store.upsert_topic(state)
             self._publish_topic_updated(state)
             return self.get_topic_detail(topic_id)
+
+    # ---- Blocking gate endpoints -----------------------------------------------
+
+    def wait_for_gate(self, topic_id: str, gate: str, timeout: float = 600.0) -> Dict[str, Any]:
+        """Block until a gate condition is met or timeout expires.
+
+        Gates:
+          - "requirement": waits for confirm_requirement feedback request
+          - "plan": waits for confirm_plan feedback request
+        """
+        if gate not in ("requirement", "plan"):
+            raise ValidationError(f"Invalid gate: {gate!r}. Must be 'requirement' or 'plan'.")
+
+        # Subscribe BEFORE checking state to avoid missing events
+        subscriber_id, subscription = self.event_bus.subscribe()
+        try:
+            with self._lock:
+                state = self._require_topic(topic_id)
+                self._ensure_not_archived(state)
+
+            if gate == "requirement":
+                target_type = "confirm_requirement"
+                # Already satisfied?
+                with self._lock:
+                    state = self._require_topic(topic_id)
+                    if state.requirement_state in (RequirementState.SPECIFIED, RequirementState.APPROVED):
+                        return self.get_topic_detail(topic_id)
+
+            else:  # gate == "plan"
+                target_type = "confirm_plan"
+                with self._lock:
+                    state = self._require_topic(topic_id)
+                    if state.plan_approved_at:
+                        return self.get_topic_detail(topic_id)
+                    # Check if confirm_plan feedback already exists
+                    pending = self.store.list_feedback_requests(topic_id=topic_id)
+                    for req in pending:
+                        if req.request_type == FeedbackRequestType.CONFIRM_PLAN:
+                            return self.get_topic_detail(topic_id)
+
+            # Wait for the matching event
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise GateTimeoutError(f"Timeout after {timeout}s waiting for gate '{gate}'")
+                try:
+                    event = subscription.get(timeout=remaining)
+                except queue.Empty:
+                    raise GateTimeoutError(f"Timeout after {timeout}s waiting for gate '{gate}'")
+
+                if event.topic_id != topic_id:
+                    continue
+                if event.event_type != "feedback.requested":
+                    continue
+                req_type = event.payload.get("feedback_request", {}).get("request_type", "")
+                if req_type == target_type:
+                    return self.get_topic_detail(topic_id)
+        finally:
+            self.event_bus.unsubscribe(subscriber_id)
+
+    def execute_and_wait(self, topic_id: str, executor_name: str = "claude",
+                         command: Optional[List[str]] = None, timeout: float = 600.0) -> Dict[str, Any]:
+        """Trigger a run and block until it finishes or timeout expires."""
+        # Subscribe BEFORE triggering so we don't miss the finish event
+        subscriber_id, subscription = self.event_bus.subscribe()
+        try:
+            run_dict = self.trigger_run(topic_id, executor_name, command or [])
+            run_id = run_dict["run_id"]
+
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise GateTimeoutError(f"Timeout after {timeout}s waiting for run {run_id} to finish")
+                try:
+                    event = subscription.get(timeout=remaining)
+                except queue.Empty:
+                    raise GateTimeoutError(f"Timeout after {timeout}s waiting for run {run_id} to finish")
+
+                if event.event_type == "run.finished" and event.run_id == run_id:
+                    return self.get_topic_detail(topic_id)
+        finally:
+            self.event_bus.unsubscribe(subscriber_id)
 
     # ---- Async agent-powered clarification & planning -------------------------
 
