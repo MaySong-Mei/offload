@@ -55,6 +55,7 @@ class HarnessService:
         }
         self._lock = threading.RLock()
         self._run_threads: Dict[str, threading.Thread] = {}
+        self._feedback_timers: Dict[str, threading.Timer] = {}
         self._project_paths = project_paths or []
         self.sensor_runner = SensorRunner(self.store, self.event_bus, self._project_paths)
         self.reindex()
@@ -317,6 +318,8 @@ class HarnessService:
             request = self.store.get_feedback_request(request_id)
             if request is None or request.topic_id != topic_id:
                 raise NotFoundError(f"Feedback request {request_id} was not found.")
+            if request.status != FeedbackRequestStatus.PENDING:
+                raise ValidationError("Feedback request already resolved")
             response = FeedbackResponse(
                 response_id=f"resp-{uuid.uuid4().hex[:12]}",
                 request_id=request_id,
@@ -358,6 +361,11 @@ class HarnessService:
                 payload={"feedback_response": response.to_json_dict(), "feedback_request": request.to_json_dict()},
             )
             self.event_bus.publish(event)
+
+            # Cancel auto-dismiss timer if one is running for this request
+            timer = self._feedback_timers.pop(request_id, None)
+            if timer is not None:
+                timer.cancel()
 
             return self.get_topic_detail(topic_id)
 
@@ -431,19 +439,19 @@ class HarnessService:
                 with self._lock:
                     state = self._require_topic(topic_id)
                     if state.requirement_state in (RequirementState.SPECIFIED, RequirementState.APPROVED):
-                        return self.get_topic_detail(topic_id)
+                        return {"status": "completed", "topic": self.get_topic_detail(topic_id)}
 
             else:  # gate == "plan"
                 target_type = "confirm_plan"
                 with self._lock:
                     state = self._require_topic(topic_id)
                     if state.plan_approved_at:
-                        return self.get_topic_detail(topic_id)
+                        return {"status": "completed", "topic": self.get_topic_detail(topic_id)}
                     # Check if confirm_plan feedback already exists
                     pending = self.store.list_feedback_requests(topic_id=topic_id)
                     for req in pending:
                         if req.request_type == FeedbackRequestType.CONFIRM_PLAN:
-                            return self.get_topic_detail(topic_id)
+                            return {"status": "completed", "topic": self.get_topic_detail(topic_id)}
 
             # Wait for the matching event
             deadline = time.monotonic() + timeout
@@ -462,7 +470,13 @@ class HarnessService:
                     continue
                 req_type = event.payload.get("feedback_request", {}).get("request_type", "")
                 if req_type == target_type:
-                    return self.get_topic_detail(topic_id)
+                    return {"status": "completed", "topic": self.get_topic_detail(topic_id)}
+                # Non-gate feedback request — return early so caller can answer it
+                return {
+                    "status": "needs_input",
+                    "feedback_request": event.payload.get("feedback_request", {}),
+                    "topic": self.get_topic_detail(topic_id),
+                }
         finally:
             self.event_bus.unsubscribe(subscriber_id)
 
@@ -936,6 +950,43 @@ class HarnessService:
 
     # ---- Helpers -------------------------------------------------------------
 
+    def _auto_dismiss_feedback(self, request_id: str, topic_id: str) -> None:
+        """Timer callback: dismiss a feedback request if still pending after 120s."""
+        with self._lock:
+            self._feedback_timers.pop(request_id, None)
+            request = self.store.get_feedback_request(request_id)
+            if request is None or request.status != FeedbackRequestStatus.PENDING:
+                return
+            state = self.store.get_topic(topic_id)
+            if state is None:
+                return
+            proj = state.project
+            request.status = FeedbackRequestStatus.DISMISSED
+            request.resolved_at = utc_now()
+            response = FeedbackResponse(
+                response_id=f"resp-{uuid.uuid4().hex[:12]}",
+                request_id=request_id,
+                topic_id=topic_id,
+                note="Auto-dismissed after 120s timeout",
+                actor="system",
+            )
+            self.workspace.save_feedback_response(response, project=proj)
+            self.workspace.save_feedback_request(request, project=proj)
+            self.store.insert_feedback_response(response)
+            self.store.upsert_feedback_request(request)
+            if state.pending_feedback_request_id == request_id:
+                state.pending_feedback_request_id = None
+                state.updated_at = utc_now()
+                self.workspace.save_state(state)
+                self.store.upsert_topic(state)
+                self._publish_topic_updated(state)
+            event = self._record_event(
+                "feedback.responded",
+                topic_id=topic_id,
+                payload={"feedback_response": response.to_json_dict(), "feedback_request": request.to_json_dict()},
+            )
+            self.event_bus.publish(event)
+
     def _resolve_pending_requests(self, topic_id: str, request_type: FeedbackRequestType, project: Optional[str] = None) -> None:
         requests = self.store.list_feedback_requests(topic_id=topic_id, pending_only=True)
         for request in requests:
@@ -953,6 +1004,12 @@ class HarnessService:
     def _publish_feedback_requested(self, request: FeedbackRequest) -> None:
         event = self._record_event("feedback.requested", topic_id=request.topic_id, payload={"feedback_request": request.to_json_dict()})
         self.event_bus.publish(event)
+        # Schedule auto-dismiss for non-gate feedback requests
+        if request.request_type not in (FeedbackRequestType.CONFIRM_REQUIREMENT, FeedbackRequestType.CONFIRM_PLAN):
+            timer = threading.Timer(120.0, self._auto_dismiss_feedback, args=[request.request_id, request.topic_id])
+            timer.daemon = True
+            timer.start()
+            self._feedback_timers[request.request_id] = timer
 
     def _record_event(
         self,
