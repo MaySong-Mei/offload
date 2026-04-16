@@ -66,6 +66,8 @@ class TopicPlanner:
 ## Status
 
 Pending — agent will analyze and write structured requirement after discussing with user."""
+        if shared_context:
+            requirement += f"\n\n## Shared Context\n\n{shared_context}"
 
         plan = "# Implementation Plan\n\nPending — requirement must be confirmed first."
 

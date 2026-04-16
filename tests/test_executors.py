@@ -4,7 +4,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from offload.executors import ClaudeExecutor, CommandExecutor
+from server.offload.executors import ClaudeExecutor, CommandExecutor
+from server.offload.agents._base import build_prompt_from_docs
 
 
 class TestCommandExecutor(unittest.TestCase):
@@ -60,7 +61,7 @@ class TestClaudeExecutor(unittest.TestCase):
             (topic_path / "requirement.md").write_text("Build a REST API")
             (topic_path / "plan.md").write_text("Step 1: Create endpoints")
 
-            prompt = ClaudeExecutor._build_prompt_from_docs(topic_path)
+            prompt = build_prompt_from_docs(topic_path)
             self.assertIn("Build a REST API", prompt)
             self.assertIn("Step 1: Create endpoints", prompt)
             self.assertIn("Requirement", prompt)
@@ -68,7 +69,7 @@ class TestClaudeExecutor(unittest.TestCase):
 
     def test_build_prompt_no_docs(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            prompt = ClaudeExecutor._build_prompt_from_docs(Path(tmpdir))
+            prompt = build_prompt_from_docs(Path(tmpdir))
             self.assertIn("No requirement or plan", prompt)
 
     def test_workspace_dir_from_context(self) -> None:

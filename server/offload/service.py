@@ -167,6 +167,16 @@ class HarnessService:
             )
             self.event_bus.publish(topic_event)
 
+            # Create initial feedback request synchronously so callers
+            # see it in the returned detail (mirrors refresh_requirement).
+            request = self.planner.requirement_feedback_request(topic_id)
+            state.pending_feedback_request_id = request.request_id
+            self.workspace.save_feedback_request(request, project=proj)
+            self.workspace.save_state(state)
+            self.store.upsert_topic(state)
+            self.store.upsert_feedback_request(request)
+            self._publish_feedback_requested(request)
+
             # Kick off async agent clarification
             project_context = self._load_project_context(proj)
             threading.Thread(
