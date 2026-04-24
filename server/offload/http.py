@@ -167,6 +167,25 @@ def make_handler():
                         agents.append(executor.check_status().to_dict())
                 self._write_json(HTTPStatus.OK, {"agents": agents})
                 return
+            if parsed.path == "/chat/config":
+                has_key = self.server.service.chat_manager.has_api_key()
+                self._write_json(HTTPStatus.OK, {
+                    "has_api_key": has_key,
+                    "api_key_preview": self.server.service.chat_manager.get_api_key()[:8] + "…" if has_key else "",
+                })
+                return
+            if parsed.path == "/chat/sessions":
+                sessions = self.server.service.list_chat_sessions()
+                self._write_json(HTTPStatus.OK, {"sessions": sessions})
+                return
+            # GET /chat/sessions/<id>/messages
+            if parsed.path.startswith("/chat/sessions/") and parsed.path.endswith("/messages"):
+                parts = parsed.path.split("/")
+                if len(parts) == 5:
+                    session_id = parts[3]
+                    messages = self.server.service.chat_manager.get_messages(session_id)
+                    self._write_json(HTTPStatus.OK, {"messages": messages})
+                return
             if parsed.path == "/events":
                 query = parse_qs(parsed.query)
                 after = int(query.get("after", ["0"])[0])
@@ -193,6 +212,35 @@ def make_handler():
             parsed = urlparse(self.path)
             payload = self._read_json_body()
             try:
+                if parsed.path == "/chat/config":
+                    api_key = payload.get("anthropic_api_key", "")
+                    if api_key:
+                        self.server.service.chat_manager.set_api_key(api_key)
+                        self._write_json(HTTPStatus.OK, {"status": "saved"})
+                    else:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'anthropic_api_key'"})
+                    return
+                if parsed.path == "/chat/sessions":
+                    project = payload.get("project")  # None for free-floating
+                    session = self.server.service.create_chat_session(project=project)
+                    self._write_json(HTTPStatus.CREATED, session)
+                    return
+                # Match /chat/sessions/<id>/messages
+                if parsed.path.startswith("/chat/sessions/") and parsed.path.endswith("/messages"):
+                    parts = parsed.path.split("/")
+                    # /chat/sessions/<id>/messages → parts = ['', 'chat', 'sessions', '<id>', 'messages']
+                    if len(parts) == 5:
+                        session_id = parts[3]
+                        message = payload.get("message", "")
+                        if not message:
+                            self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'message'"})
+                            return
+                        started = self.server.service.send_chat_message(session_id, message)
+                        if started:
+                            self._write_json(HTTPStatus.ACCEPTED, {"status": "streaming"})
+                        else:
+                            self._write_json(HTTPStatus.CONFLICT, {"error": "Session busy or not found"})
+                        return
                 if parsed.path == "/sensors/construct":
                     # Create a topic that builds a sensor
                     project = payload.get("project", "")

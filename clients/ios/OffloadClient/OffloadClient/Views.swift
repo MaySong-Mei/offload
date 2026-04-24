@@ -19,38 +19,515 @@ private func _relativeTime(_ isoDate: String) -> String {
 
 struct RootView: View {
     @StateObject private var model = AppModel()
-    @State private var showingNewTopicSheet = false
     @State private var showingSettings = false
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var navPath = NavigationPath()
+
+    // 0 = closed, ~0.75 = sidebar open, 1 = sidebar full screen
+    @State private var openFraction: CGFloat = 0
+    private let defaultFraction: CGFloat = 0.75
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            ProjectsView(model: model, showingSettings: $showingSettings)
-        } content: {
-            if model.selectedProjectKey != nil {
-                ProjectDashboardView(model: model, showingNewTopicSheet: $showingNewTopicSheet)
-            } else {
-                ContentUnavailableView {
-                    Label("Choose a Project", systemImage: "folder")
-                } description: {
-                    Text("Select a project from the sidebar to see its topics.")
+        GeometryReader { geo in
+            let screenWidth = geo.size.width
+            let screenHeight = geo.size.height
+
+            // Sidebar: grows from 0 to full width
+            let sidebarW = openFraction * screenWidth
+
+            // Chat card: fixed full width, but scaled down + pushed right
+            let chatScale = 1.0 - openFraction * 0.12  // shrinks to 88%
+            let chatOffset = sidebarW  // pushed right by sidebar width
+
+            ZStack(alignment: .leading) {
+                // Background
+                Color(.systemGroupedBackground)
+                    .ignoresSafeArea()
+
+                // Sidebar card
+                ChatSidebarView(model: model, showingSettings: $showingSettings, onDismiss: {
+                    closeSidebar()
+                }, onOpenProject: { path, name in
+                    closeSidebar()
+                    navPath = NavigationPath()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        navPath.append(ProjectNavItem(path: path, name: name))
+                    }
+                })
+                .frame(width: max(sidebarW - 8, 0))  // slight gap from chat card
+                .padding(.leading, 4)
+                .clipped()
+
+                // Chat card — always full width, scaled + offset
+                NavigationStack(path: $navPath) {
+                    ChatView(model: model)
+                        .toolbar {
+                            ToolbarItem(placement: .navigationBarLeading) {
+                                Button { toggleSidebar() } label: {
+                                    Image(systemName: "line.3.horizontal")
+                                        .font(.body.weight(.medium))
+                                }
+                            }
+                            ToolbarItem(placement: .principal) {
+                                ProjectPickerPill(model: model)
+                            }
+                            ToolbarItem(placement: .navigationBarTrailing) {
+                                Button {
+                                    Task { await model.createChatSession() }
+                                } label: {
+                                    Image(systemName: "square.and.pencil")
+                                        .font(.body.weight(.medium))
+                                }
+                            }
+                        }
+                        .navigationDestination(for: ProjectNavItem.self) { item in
+                            ProjectDashboardView(model: model, showingNewTopicSheet: .constant(false))
+                                .onAppear { model.selectedProjectKey = item.path }
+                                .navigationTitle(item.name)
+                        }
+                }
+                .frame(width: screenWidth, height: screenHeight)
+                .background(Color(.systemBackground))
+                .cornerRadius(openFraction > 0.01 ? 20 : 0)
+                .scaleEffect(chatScale, anchor: .trailing)
+                .offset(x: chatOffset)
+                .shadow(color: .black.opacity(openFraction > 0.01 ? 0.2 : 0), radius: 16, x: -4, y: 0)
+                .allowsHitTesting(openFraction < 0.01)
+                .overlay {
+                    if openFraction > 0.01 {
+                        Color.black.opacity(Double(openFraction) * 0.06)
+                            .cornerRadius(20)
+                            .onTapGesture { closeSidebar() }
+                            .allowsHitTesting(true)
+                    }
                 }
             }
-        } detail: {
-            ContentUnavailableView {
-                Label("No Topic Selected", systemImage: "doc.text.magnifyingglass")
-            } description: {
-                Text("Choose a topic from the list or create a new one.")
-            }
-        }
-        .sheet(isPresented: $showingNewTopicSheet) {
-            NewTopicSheet(model: model, parentTopic: nil)
+            .gesture(
+                DragGesture(minimumDistance: 12, coordinateSpace: .global)
+                    .onChanged { value in
+                        let isFromEdge = value.startLocation.x < 30
+                        let isOpen = openFraction > 0.01
+                        let isHorizontal = abs(value.translation.width) > abs(value.translation.height)
+
+                        guard (isFromEdge || isOpen) && isHorizontal else { return }
+
+                        let drag = value.translation.width / screenWidth
+                        let newFraction = (isFromEdge && !isOpen)
+                            ? drag
+                            : openFraction + drag
+                        openFraction = min(max(newFraction, 0), 1)
+                    }
+                    .onEnded { value in
+                        let predicted = value.predictedEndTranslation.width / screenWidth
+                        let target = openFraction + predicted * 0.3
+
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                            if target > (1 + defaultFraction) / 2 {
+                                openFraction = 1
+                            } else if target > defaultFraction * 0.35 {
+                                openFraction = defaultFraction
+                            } else {
+                                openFraction = 0
+                            }
+                        }
+                    }
+            )
         }
         .sheet(isPresented: $showingSettings) {
             SettingsSheet(model: model)
         }
         .task {
             model.bootstrap()
+        }
+    }
+
+    private func toggleSidebar() {
+        // Use 300/screen ratio as default, but we don't have geo here so use a reasonable default
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            openFraction = openFraction > 0.01 ? 0 : 0.75
+        }
+    }
+
+    private func closeSidebar() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            openFraction = 0
+        }
+    }
+}
+
+struct ProjectNavItem: Hashable {
+    let path: String
+    let name: String
+}
+
+// MARK: - Chat Sidebar
+
+private struct ChatSidebarView: View {
+    @ObservedObject var model: AppModel
+    @Binding var showingSettings: Bool
+    var onDismiss: () -> Void
+    var onOpenProject: (String, String) -> Void
+
+    private var projectSessions: [(project: String, name: String, sessions: [ChatSessionSummary])] {
+        let grouped = Dictionary(grouping: model.chatSessions.filter { $0.project != nil }) { $0.project! }
+        return grouped.map { path, sessions in
+            let name = model.projects.first(where: { $0.path == path })?.name
+                ?? (path as NSString).lastPathComponent
+            return (project: path, name: name, sessions: sessions)
+        }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private var ideaSessions: [ChatSessionSummary] {
+        model.chatSessions.filter { $0.project == nil }
+    }
+
+    @State private var expandedProjects: Set<String> = []
+
+    private func projectSessionCount(for path: String) -> Int {
+        model.chatSessions.filter { $0.project == path }.count
+    }
+
+    private func sessionsForProject(_ path: String) -> [ChatSessionSummary] {
+        model.chatSessions.filter { $0.project == path }
+    }
+
+    private func projectName(for path: String?) -> String? {
+        guard let path else { return nil }
+        return model.projects.first(where: { $0.path == path })?.name
+            ?? (path as NSString).lastPathComponent
+    }
+
+    @State private var showingDashboard = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header — tappable to open dashboard
+            Button {
+                showingDashboard = true
+            } label: {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Offload")
+                            .font(.title2.weight(.bold))
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Button { showingSettings = true } label: {
+                            Image(systemName: "gearshape")
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(model.statusMessage == "Connected" ? Color.green : (model.statusMessage == "Disconnected" ? Color.red : Color.orange))
+                            .frame(width: 7, height: 7)
+                        Text(model.statusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 4)
+            }
+            .buttonStyle(.plain)
+            .sheet(isPresented: $showingDashboard) {
+                ServerDashboardSheet(model: model)
+            }
+
+            // Session list
+            List {
+                // Projects section
+                if !model.projects.isEmpty {
+                    Section {
+                        ForEach(model.projects.filter { $0.isInitialized }) { project in
+                            // Project row
+                            HStack(spacing: 10) {
+                                // Tap project name → push dashboard on main view
+                                Button {
+                                    onOpenProject(project.path, project.name)
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "folder.fill")
+                                            .foregroundStyle(Color.accentColor)
+                                            .font(.body)
+                                        Text(project.name)
+                                            .font(.subheadline)
+                                            .foregroundStyle(.primary)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+
+                                Spacer()
+
+                                // Tap count badge → expand/collapse sessions
+                                let count = projectSessionCount(for: project.path)
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        if expandedProjects.contains(project.path) {
+                                            expandedProjects.remove(project.path)
+                                        } else {
+                                            expandedProjects.insert(project.path)
+                                        }
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        if count > 0 {
+                                            Text("\(count)")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Image(systemName: expandedProjects.contains(project.path) ? "chevron.down" : "chevron.right")
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color(.systemGray5), in: Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            // Expanded sessions for this project
+                            if expandedProjects.contains(project.path) {
+                                ForEach(sessionsForProject(project.path)) { session in
+                                    ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID)
+                                        .padding(.leading, 20)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            model.selectChatSession(session.sessionId)
+                                            onDismiss()
+                                        }
+                                }
+                            }
+                        }
+                    } header: {
+                        Text("Projects")
+                    }
+                }
+
+                // Recents — sessions without a project
+                if !ideaSessions.isEmpty {
+                    Section {
+                        ForEach(ideaSessions) { session in
+                            ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    model.selectChatSession(session.sessionId)
+                                    onDismiss()
+                                }
+                        }
+                    } header: {
+                        Text("Recents")
+                    }
+                }
+            }
+            .listStyle(.plain)
+
+            // Bottom: New Chat button
+            HStack {
+                Spacer()
+                Button {
+                    Task { await model.createChatSession() }
+                    onDismiss()
+                } label: {
+                    Label("Chat", systemImage: "square.and.pencil")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.accentColor, in: Capsule())
+                        .foregroundStyle(.white)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            // Project chat menu
+            if !model.projects.isEmpty {
+                Menu {
+                    ForEach(model.projects) { project in
+                        Button(project.name) {
+                            Task { await model.createChatSession(project: project.path) }
+                            onDismiss()
+                        }
+                    }
+                } label: {
+                    Label("Project Chat", systemImage: "folder.badge.plus")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.bottom, 8)
+            }
+        }
+    }
+}
+
+private struct ChatSessionRow: View {
+    let session: ChatSessionSummary
+    var isSelected: Bool = false
+    var projectName: String? = nil
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(session.title)
+                    .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    if let projectName {
+                        Text(projectName)
+                            .font(.caption2)
+                            .foregroundStyle(Color.accentColor)
+                        Text("·")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    Text(_relativeTime(session.lastMessageAt))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 2)
+        .listRowBackground(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+    }
+}
+
+private struct ConnectionStatusView: View {
+    @ObservedObject var model: AppModel
+    @Binding var showingSettings: Bool
+
+    var body: some View {
+        Button { showingSettings = true } label: {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                Text(model.statusMessage)
+                    .font(.caption2)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color(.systemGray5), in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var statusColor: Color {
+        switch model.statusMessage {
+        case "Connected": return .green
+        case "Disconnected": return .red
+        default: return .orange
+        }
+    }
+}
+
+// MARK: - Server Dashboard Sheet
+
+private struct ServerDashboardSheet: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                // Connection
+                Section("Server") {
+                    HStack {
+                        Text("Status")
+                        Spacer()
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(model.statusMessage == "Connected" ? Color.green : Color.red)
+                                .frame(width: 7, height: 7)
+                            Text(model.statusMessage)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    HStack {
+                        Text("URL")
+                        Spacer()
+                        Text(model.serverURLString)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                // Projects
+                Section("Projects (\(model.projects.count))") {
+                    ForEach(model.projects) { project in
+                        HStack {
+                            Image(systemName: project.isInitialized ? "folder.fill" : "folder")
+                                .foregroundStyle(project.isInitialized ? Color.accentColor : Color.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(project.name)
+                                    .font(.subheadline.weight(.medium))
+                                if let summary = project.summary, !summary.isEmpty {
+                                    Text(summary)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                            }
+                            Spacer()
+                            Text(project.statusLabel)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                // Topics summary
+                Section("Topics (\(model.topics.count))") {
+                    let active = model.topics.filter { $0.decisionState != .archived }
+                    let archived = model.topics.filter { $0.decisionState == .archived }
+                    HStack {
+                        Text("Active")
+                        Spacer()
+                        Text("\(active.count)")
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Archived")
+                        Spacer()
+                        Text("\(archived.count)")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                // Chat sessions
+                Section("Chat Sessions (\(model.chatSessions.count))") {
+                    let projectBound = model.chatSessions.filter { $0.project != nil }.count
+                    let freeFloating = model.chatSessions.filter { $0.project == nil }.count
+                    HStack {
+                        Text("Project-bound")
+                        Spacer()
+                        Text("\(projectBound)")
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Free-floating")
+                        Spacer()
+                        Text("\(freeFloating)")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("Offload")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
         }
     }
 }
@@ -1690,6 +2167,10 @@ private struct InitLogSheet: View {
 private struct SettingsSheet: View {
     @ObservedObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    @State private var anthropicApiKey = ""
+    @State private var hasApiKey = false
+    @State private var apiKeyPreview = ""
+    @State private var apiKeySaved = false
 
     var body: some View {
         NavigationStack {
@@ -1718,6 +2199,49 @@ private struct SettingsSheet: View {
                             .fill(model.isOnline ? .green : .secondary)
                             .frame(width: 6, height: 6)
                         Text(model.statusMessage)
+                    }
+                }
+
+                // MARK: Claude API Key
+                Section {
+                    SecureField("sk-ant-…", text: $anthropicApiKey)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.footnote.monospaced())
+                    Button {
+                        Task {
+                            guard let client = model.makeClient() else { return }
+                            do {
+                                try await client.saveChatApiKey(anthropicApiKey)
+                                apiKeySaved = true
+                                anthropicApiKey = ""
+                                // Refresh config
+                                if let config = try? await client.fetchChatConfig() {
+                                    apiKeyPreview = config.apiKeyPreview
+                                    hasApiKey = config.hasApiKey
+                                }
+                            } catch {
+                                model.errorMessage = error.localizedDescription
+                            }
+                        }
+                    } label: {
+                        Label("Save Key", systemImage: "key")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(anthropicApiKey.isEmpty)
+                } header: {
+                    Text("Claude API")
+                } footer: {
+                    if hasApiKey {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                                .font(.caption)
+                            Text("Key configured: \(apiKeyPreview)")
+                        }
+                    } else {
+                        Text("Required for chat. Get a key from console.anthropic.com")
                     }
                 }
 
@@ -1789,6 +2313,13 @@ private struct SettingsSheet: View {
             .task {
                 if model.isOnline && model.agentStatuses.isEmpty {
                     await model.fetchAgentStatuses()
+                }
+                // Load API key status
+                if let client = model.makeClient() {
+                    if let config = try? await client.fetchChatConfig() {
+                        hasApiKey = config.hasApiKey
+                        apiKeyPreview = config.apiKeyPreview
+                    }
                 }
             }
         }
@@ -3071,5 +3602,270 @@ private struct StatusChip: View {
             .padding(.vertical, 4)
             .foregroundStyle(chipColor)
             .background(chipColor.opacity(0.12), in: Capsule())
+    }
+}
+
+// MARK: - Chat View
+
+struct ChatView: View {
+    @ObservedObject var model: AppModel
+    @State private var inputText = ""
+    @FocusState private var isInputFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+
+            // Messages
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        if model.chatMessages.isEmpty {
+                            VStack(spacing: 12) {
+                                Image(systemName: "bubble.left.and.text.bubble.right")
+                                    .font(.system(size: 40))
+                                    .foregroundStyle(.tertiary)
+                                Text("What are you thinking about?")
+                                    .font(.headline)
+                                    .foregroundStyle(.secondary)
+                                Text("Describe what you want to build, fix, or change.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.tertiary)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 60)
+                        }
+                        ForEach(model.chatMessages) { message in
+                            ChatBubble(message: message, model: model)
+                                .id(message.id)
+                        }
+                        if model.isChatStreaming, let last = model.chatMessages.last,
+                           !(last.role == "assistant" && last.isStreaming) {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Thinking…")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal)
+                            .id("typing")
+                        }
+                    }
+                    .padding(.vertical, 12)
+                }
+                .onChange(of: model.chatMessages.count) { _ in
+                    withAnimation {
+                        if let last = model.chatMessages.last {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+
+            // Input bar
+            chatInputBar
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+        }
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var chatInputBar: some View {
+        let bar = HStack(spacing: 8) {
+            TextField("What's on your mind?", text: $inputText, axis: .vertical)
+                .lineLimit(1...5)
+                .textFieldStyle(.plain)
+                .focused($isInputFocused)
+                .onSubmit { sendMessage() }
+
+            Button(action: sendMessage) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary : Color.accentColor)
+            }
+            .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isChatStreaming)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+
+        if #available(iOS 26.0, *) {
+            bar.glassEffect(in: .rect(cornerRadius: 22))
+        } else {
+            bar.background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 22))
+        }
+    }
+
+    private func sendMessage() {
+        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        inputText = ""
+        Task {
+            await model.sendChatMessage(text)
+        }
+    }
+}
+
+private struct ProjectPickerPill: View {
+    @ObservedObject var model: AppModel
+
+    private var currentSession: ChatSessionSummary? {
+        guard let sid = model.selectedChatSessionID else { return nil }
+        return model.chatSessions.first { $0.sessionId == sid }
+    }
+
+    private var currentProjectName: String? {
+        guard let path = currentSession?.project else { return nil }
+        return model.projects.first { $0.path == path }?.name
+            ?? (path as NSString).lastPathComponent
+    }
+
+    private var displayLabel: String {
+        if model.isChatStreaming { return "Thinking…" }
+        return currentProjectName ?? "Offload"
+    }
+
+    var body: some View {
+        if model.isChatStreaming {
+            // Streaming state — non-interactive pill
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("Thinking…")
+                    .font(.subheadline.weight(.medium))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(Color.orange.opacity(0.15), in: Capsule())
+            .foregroundStyle(.orange)
+        } else {
+            // Project picker menu
+            Menu {
+                Button {
+                    // No project — keep as free chat or do nothing if already free
+                } label: {
+                    Label("No Project", systemImage: "bubble.left")
+                }
+
+                Divider()
+
+                ForEach(model.projects.filter { $0.isInitialized }) { project in
+                    Button {
+                        Task { await model.createChatSession(project: project.path) }
+                    } label: {
+                        Label(project.name, systemImage: "folder.fill")
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    if currentSession?.project != nil {
+                        Image(systemName: "folder.fill")
+                            .font(.caption)
+                    }
+                    Text(displayLabel)
+                        .font(.subheadline.weight(.medium))
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(Color(.systemGray5), in: Capsule())
+                .foregroundStyle(.primary)
+            }
+        }
+    }
+}
+
+private struct ChatBubble: View {
+    let message: ChatMessage
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        if let card = message.card {
+            ChatCardView(card: card, model: model)
+                .padding(.horizontal, 12)
+        } else if message.role == "system" {
+            HStack {
+                Spacer()
+                Text(message.content)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 2)
+        } else {
+            HStack {
+                if message.role == "user" { Spacer(minLength: 60) }
+                Text(message.content)
+                    .font(.body)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        message.role == "user"
+                            ? Color.accentColor.opacity(0.15)
+                            : Color(.systemGray6),
+                        in: RoundedRectangle(cornerRadius: 12)
+                    )
+                    .textSelection(.enabled)
+                if message.role == "assistant" { Spacer(minLength: 60) }
+            }
+            .padding(.horizontal, 12)
+        }
+    }
+}
+
+private struct ChatCardView: View {
+    let card: ChatCard
+    @ObservedObject var model: AppModel
+    @State private var selectedOption: String?
+    @State private var noteText = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(card.title)
+                .font(.headline)
+
+            if !card.prompt.isEmpty {
+                Text(card.prompt)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !card.options.isEmpty {
+                FlowLayout(spacing: 8) {
+                    ForEach(card.options, id: \.self) { option in
+                        Button(action: { selectedOption = option }) {
+                            Text(option)
+                                .font(.subheadline.weight(.medium))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(
+                                    selectedOption == option ? Color.orange.opacity(0.3) : Color(.systemGray5),
+                                    in: Capsule()
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                if selectedOption != nil {
+                    Button("Send") {
+                        Task {
+                            await model.respondToChatCard(
+                                card: card,
+                                selectedOptions: [selectedOption].compactMap { $0 },
+                                note: noteText
+                            )
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+            }
+        }
+        .padding(12)
+        .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 12))
     }
 }

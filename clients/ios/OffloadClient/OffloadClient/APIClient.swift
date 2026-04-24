@@ -236,6 +236,44 @@ struct APIClient {
         )
     }
 
+    // MARK: - Chat Sessions
+
+    func fetchChatConfig() async throws -> ChatConfigResponse {
+        try await send("/chat/config", response: ChatConfigResponse.self)
+    }
+
+    func saveChatApiKey(_ key: String) async throws {
+        struct Body: Codable { let anthropicApiKey: String }
+        struct Resp: Codable { let status: String }
+        _ = try await send("/chat/config", method: "POST", body: Body(anthropicApiKey: key), response: Resp.self)
+    }
+
+    func fetchChatSessions() async throws -> [ChatSessionSummary] {
+        try await send("/chat/sessions", response: ChatSessionListResponse.self).sessions
+    }
+
+    func createChatSession(project: String? = nil) async throws -> ChatSessionSummary {
+        try await send(
+            "/chat/sessions",
+            method: "POST",
+            body: ChatCreateSessionRequest(project: project),
+            response: ChatSessionSummary.self
+        )
+    }
+
+    func fetchChatMessages(sessionID: String) async throws -> [ChatMessageDTO] {
+        try await send("/chat/sessions/\(sessionID)/messages", response: ChatMessagesResponse.self).messages
+    }
+
+    func sendChatMessage(sessionID: String, message: String) async throws {
+        _ = try await send(
+            "/chat/sessions/\(sessionID)/messages",
+            method: "POST",
+            body: ChatSendRequest(message: message),
+            response: ChatStatusResponse.self
+        )
+    }
+
     func eventRequest() throws -> URLRequest {
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
         components?.scheme = websocketScheme(for: baseURL.scheme ?? "http")

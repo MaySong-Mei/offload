@@ -30,6 +30,12 @@ final class AppModel: ObservableObject {
     @Published var signals: [SignalModel] = []
     @Published var agentConversation: [AgentStreamEvent] = []
 
+    // Chat sessions
+    @Published var chatSessions: [ChatSessionSummary] = []
+    @Published var selectedChatSessionID: String?
+    @Published var chatMessages: [ChatMessage] = []
+    @Published var isChatStreaming = false
+
     // Combined list: server-discovered projects + projects referenced by topics + ungrouped slot
     var allProjectGroups: [(key: String, name: String, hasReadme: Bool, topicCount: Int)] {
         var groups: [String: (name: String, hasReadme: Bool, count: Int)] = [:]
@@ -190,6 +196,11 @@ final class AppModel: ObservableObject {
                 selectedTopicDetail = try await client.fetchTopicDetail(topicID: selectedTopicID)
                 try? await localStore.saveTopicDetail(selectedTopicDetail!, topicID: selectedTopicID)
             }
+            // Load chat sessions
+            if let sessions = try? await client.fetchChatSessions() {
+                chatSessions = sessions
+            }
+
             statusMessage = "Connected"
             errorMessage = nil
             log.info("reload: success")
@@ -232,6 +243,76 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: - Create Topic
+
+    // MARK: - Chat Sessions
+
+    func loadChatSessions() async {
+        guard let client = makeClient() else { return }
+        do {
+            chatSessions = try await client.fetchChatSessions()
+        } catch {
+            print("Failed to load chat sessions: \(error)")
+        }
+    }
+
+    func createChatSession(project: String? = nil) async {
+        guard let client = makeClient() else { return }
+        do {
+            let session = try await client.createChatSession(project: project)
+            chatSessions.insert(session, at: 0)
+            selectedChatSessionID = session.sessionId
+            chatMessages.removeAll()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func selectChatSession(_ sessionID: String) {
+        selectedChatSessionID = sessionID
+        chatMessages.removeAll()
+        isChatStreaming = false
+        // Load message history from server
+        Task {
+            guard let client = makeClient() else { return }
+            do {
+                let dtos = try await client.fetchChatMessages(sessionID: sessionID)
+                chatMessages = dtos.map { ChatMessage(role: $0.role, content: $0.content) }
+            } catch {
+                print("Failed to load chat messages: \(error)")
+            }
+        }
+    }
+
+    func sendChatMessage(_ message: String) async {
+        guard let sessionID = selectedChatSessionID else { return }
+        guard let client = makeClient() else { return }
+
+        chatMessages.append(ChatMessage(role: "user", content: message))
+        isChatStreaming = true
+
+        do {
+            try await client.sendChatMessage(sessionID: sessionID, message: message)
+        } catch {
+            isChatStreaming = false
+            chatMessages.append(ChatMessage(role: "assistant", content: "Error: \(error.localizedDescription)"))
+        }
+    }
+
+    func respondToChatCard(card: ChatCard, selectedOptions: [String], note: String) async {
+        guard let sessionID = selectedChatSessionID else { return }
+        guard let client = makeClient() else { return }
+
+        let responseText = note.isEmpty ? selectedOptions.joined(separator: ", ") : note
+        chatMessages.append(ChatMessage(role: "user", content: responseText))
+        isChatStreaming = true
+
+        do {
+            try await client.sendChatMessage(sessionID: sessionID, message: responseText)
+        } catch {
+            isChatStreaming = false
+            chatMessages.append(ChatMessage(role: "assistant", content: "Error: \(error.localizedDescription)"))
+        }
+    }
 
     func createTopic(title: String, rawInput: String, tagsText: String, project: String? = nil, parentTopicID: String? = nil) async {
         let tags = tagsText
@@ -549,7 +630,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func makeClient() -> APIClient? {
+    func makeClient() -> APIClient? {
         guard let url = URL(string: serverURLString) else { return nil }
         return APIClient(baseURL: url, token: apiToken)
     }
@@ -611,6 +692,49 @@ final class AppModel: ObservableObject {
                             if self.agentConversation.count > 500 {
                                 self.agentConversation.removeFirst(self.agentConversation.count - 500)
                             }
+                        }
+                        continue
+                    }
+                    // Chat events — only process if for the selected session
+                    if event.eventType.hasPrefix("chat.") {
+                        let eventSessionID = event.payload?["chat_session_id"]?.value
+                        let isMySession = eventSessionID == self.selectedChatSessionID
+
+                        if event.eventType == "chat.status" && isMySession {
+                            if let msg = event.payload?["message"]?.value, msg != "Done" {
+                                self.chatMessages.append(ChatMessage(role: "system", content: msg))
+                            }
+                        } else if event.eventType == "chat.error" && isMySession {
+                            self.isChatStreaming = false
+                            if let err = event.payload?["error"]?.value {
+                                self.chatMessages.append(ChatMessage(role: "system", content: "Error: \(err)"))
+                            }
+                        } else if event.eventType == "chat.stream" && isMySession {
+                            let evtType = event.payload?["claude_event_type"]?.value ?? ""
+                            if evtType == "assistant", let text = event.payload?["text"]?.value, !text.isEmpty {
+                                if let lastIdx = self.chatMessages.indices.last,
+                                   self.chatMessages[lastIdx].role == "assistant" && self.chatMessages[lastIdx].isStreaming {
+                                    self.chatMessages[lastIdx].content += text
+                                } else {
+                                    self.chatMessages.append(ChatMessage(role: "assistant", content: text, isStreaming: true))
+                                }
+                            } else if evtType == "result" {
+                                if let lastIdx = self.chatMessages.indices.last,
+                                   self.chatMessages[lastIdx].role == "assistant" && self.chatMessages[lastIdx].isStreaming {
+                                    self.chatMessages[lastIdx].isStreaming = false
+                                }
+                                self.isChatStreaming = false
+                            }
+                        } else if event.eventType == "chat.done" {
+                            if isMySession {
+                                self.isChatStreaming = false
+                                if let lastIdx = self.chatMessages.indices.last,
+                                   self.chatMessages[lastIdx].isStreaming {
+                                    self.chatMessages[lastIdx].isStreaming = false
+                                }
+                            }
+                            // Refresh session list (title may have updated)
+                            await self.loadChatSessions()
                         }
                         continue
                     }

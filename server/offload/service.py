@@ -25,6 +25,7 @@ from .models import (
     TopicState,
     utc_now,
 )
+from .chat import ChatManager
 from .planner import TopicPlanner
 from .repo_offload import RepoOffload
 from .sensor_runner import SensorRunner
@@ -57,6 +58,7 @@ class HarnessService:
         self._run_threads: Dict[str, threading.Thread] = {}
         self._feedback_timers: Dict[str, threading.Timer] = {}
         self._project_paths = project_paths or []
+        self.chat_manager = ChatManager(self.event_bus, self.workspace_root)
         self.sensor_runner = SensorRunner(self.store, self.event_bus, self._project_paths)
         self.reindex()
 
@@ -112,6 +114,43 @@ class HarnessService:
                         print(f"Migrated topic {topic_id} → {new_path}", file=sys.stderr)
             except Exception as e:
                 print(f"Warning: migration failed for topic {topic_id}: {e}", file=sys.stderr)
+
+    # ---- Chat ---------------------------------------------------------------
+
+    def list_chat_sessions(self) -> List[Dict[str, Any]]:
+        return self.chat_manager.list_sessions()
+
+    def create_chat_session(self, project: Optional[str] = None) -> Dict[str, Any]:
+        session = self.chat_manager.create_session(project=project)
+        return session.to_summary()
+
+    def send_chat_message(self, session_id: str, message: str) -> bool:
+        """Send a user message to a chat session. Returns False if busy."""
+        session = self.chat_manager.get_session(session_id)
+        if not session:
+            return False
+        project_context = self._load_project_context(session.project) if session.project else None
+        topics_summary = self._build_topics_summary(session.project) if session.project else None
+        return self.chat_manager.send_message(
+            session_id=session_id,
+            message=message,
+            project_context=project_context,
+            topics_summary=topics_summary,
+        )
+
+    def _build_topics_summary(self, project_path: Optional[str]) -> Optional[str]:
+        """Build a summary of active topics for the chat system prompt."""
+        if not project_path:
+            return None
+        topics = self.store.list_topics()
+        relevant = [t for t in topics if t.project == project_path]
+        if not relevant:
+            return "No active topics."
+        lines = []
+        for t in relevant[:20]:
+            status = str(t.requirement_state)
+            lines.append(f"- [{status}] {t.title} (id: {t.topic_id})")
+        return "\n".join(lines)
 
     # ---- Topic CRUD ---------------------------------------------------------
 

@@ -348,3 +348,72 @@ struct RunCreateRequest: Codable {
     let executor: String
     let command: [String]
 }
+
+// MARK: - Chat
+
+struct ChatSessionSummary: Codable, Identifiable, Hashable {
+    let sessionId: String
+    let title: String
+    let project: String?
+    let lastMessageAt: String
+    let createdAt: String
+
+    var id: String { sessionId }
+}
+
+struct ChatSessionListResponse: Codable {
+    let sessions: [ChatSessionSummary]
+}
+
+struct ChatMessage: Identifiable {
+    let id: UUID
+    let role: String        // "user" or "assistant"
+    var content: String
+    let timestamp: Date
+    var card: ChatCard?
+    var isStreaming: Bool
+
+    init(role: String, content: String, card: ChatCard? = nil, isStreaming: Bool = false) {
+        self.id = UUID()
+        self.role = role
+        self.content = content
+        self.timestamp = Date()
+        self.card = card
+        self.isStreaming = isStreaming
+    }
+}
+
+struct ChatCard: Identifiable {
+    let id: String          // request_id
+    let cardType: String    // "confirm_execution", "choose_option", "approve_requirement", "approve_plan"
+    let title: String
+    let prompt: String
+    let options: [String]
+    let topicId: String?
+}
+
+struct ChatSendRequest: Codable {
+    let message: String
+}
+
+struct ChatCreateSessionRequest: Codable {
+    let project: String?
+}
+
+struct ChatStatusResponse: Codable {
+    let status: String
+}
+
+struct ChatMessageDTO: Codable {
+    let role: String
+    let content: String
+}
+
+struct ChatMessagesResponse: Codable {
+    let messages: [ChatMessageDTO]
+}
+
+struct ChatConfigResponse: Codable {
+    let hasApiKey: Bool
+    let apiKeyPreview: String
+}
