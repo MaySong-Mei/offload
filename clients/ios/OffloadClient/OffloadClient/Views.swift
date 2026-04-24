@@ -22,28 +22,33 @@ struct RootView: View {
     @State private var showingSettings = false
     @State private var navPath = NavigationPath()
 
-    // 0 = closed, ~0.75 = sidebar open, 1 = sidebar full screen
+    // 0 = closed, 1 = sidebar open (side-by-side), 2 = sidebar extended (full screen)
     @State private var openFraction: CGFloat = 0
-    private let defaultFraction: CGFloat = 0.75
+    private let sidebarWidth: CGFloat = 300
 
     var body: some View {
         GeometryReader { geo in
             let screenWidth = geo.size.width
-            let screenHeight = geo.size.height
 
-            // Sidebar: grows from 0 to full width
-            let sidebarW = openFraction * screenWidth
+            // Sidebar width: 0 → sidebarWidth (fraction 0→1), then sidebarWidth → screenWidth (fraction 1→2)
+            let sidebarW: CGFloat = {
+                if openFraction <= 1 {
+                    return openFraction * sidebarWidth
+                } else {
+                    let extra = openFraction - 1
+                    return sidebarWidth + extra * (screenWidth - sidebarWidth)
+                }
+            }()
+            let chatW = max(screenWidth - sidebarW - (openFraction > 0.01 ? 8 : 0), 0)
+            let chatVisible = chatW > 30
 
-            // Chat card: fixed full width, but scaled down + pushed right
-            let chatScale = 1.0 - openFraction * 0.12  // shrinks to 88%
-            let chatOffset = sidebarW  // pushed right by sidebar width
+            let f = min(openFraction, 1.0)  // clamp to 0-1 for visual effects
 
             ZStack(alignment: .leading) {
-                // Background
-                Color(.systemGroupedBackground)
-                    .ignoresSafeArea()
+                // Background — only visible when cards separate
+                Color(.systemGroupedBackground).ignoresSafeArea()
 
-                // Sidebar card
+                // Sidebar
                 ChatSidebarView(model: model, showingSettings: $showingSettings, onDismiss: {
                     closeSidebar()
                 }, onOpenProject: { path, name in
@@ -53,11 +58,10 @@ struct RootView: View {
                         navPath.append(ProjectNavItem(path: path, name: name))
                     }
                 })
-                .frame(width: max(sidebarW - 8, 0))  // slight gap from chat card
-                .padding(.leading, 4)
-                .clipped()
+                .frame(width: sidebarW)
+                .ignoresSafeArea()
 
-                // Chat card — always full width, scaled + offset
+                // Chat card
                 NavigationStack(path: $navPath) {
                     ChatView(model: model)
                         .toolbar {
@@ -85,20 +89,12 @@ struct RootView: View {
                                 .navigationTitle(item.name)
                         }
                 }
-                .frame(width: screenWidth, height: screenHeight)
-                .background(Color(.systemBackground))
-                .cornerRadius(openFraction > 0.01 ? 20 : 0)
-                .scaleEffect(chatScale, anchor: .trailing)
-                .offset(x: chatOffset)
-                .shadow(color: .black.opacity(openFraction > 0.01 ? 0.2 : 0), radius: 16, x: -4, y: 0)
+                .frame(width: screenWidth)
+                .modifier(CardEffectModifier(fraction: f))
+                .offset(x: sidebarW + f * 8)
                 .allowsHitTesting(openFraction < 0.01)
-                .overlay {
-                    if openFraction > 0.01 {
-                        Color.black.opacity(Double(openFraction) * 0.06)
-                            .cornerRadius(20)
-                            .onTapGesture { closeSidebar() }
-                            .allowsHitTesting(true)
-                    }
+                .onTapGesture {
+                    if openFraction > 0.01 { closeSidebar() }
                 }
             }
             .gesture(
@@ -110,23 +106,22 @@ struct RootView: View {
 
                         guard (isFromEdge || isOpen) && isHorizontal else { return }
 
-                        let drag = value.translation.width / screenWidth
-                        let newFraction = (isFromEdge && !isOpen)
-                            ? drag
-                            : openFraction + drag
-                        openFraction = min(max(newFraction, 0), 1)
+                        // Map drag to fraction: full screen width = 2 units
+                        let drag = value.translation.width / (screenWidth * 0.5)
+                        let newFraction = (isFromEdge && !isOpen) ? drag : openFraction + drag
+                        openFraction = min(max(newFraction, 0), 2)
                     }
                     .onEnded { value in
-                        let predicted = value.predictedEndTranslation.width / screenWidth
+                        let predicted = value.predictedEndTranslation.width / (screenWidth * 0.5)
                         let target = openFraction + predicted * 0.3
 
                         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                            if target > (1 + defaultFraction) / 2 {
-                                openFraction = 1
-                            } else if target > defaultFraction * 0.35 {
-                                openFraction = defaultFraction
+                            if target > 1.5 {
+                                openFraction = 2  // extended full screen
+                            } else if target > 0.4 {
+                                openFraction = 1  // side-by-side
                             } else {
-                                openFraction = 0
+                                openFraction = 0  // closed
                             }
                         }
                     }
@@ -141,15 +136,31 @@ struct RootView: View {
     }
 
     private func toggleSidebar() {
-        // Use 300/screen ratio as default, but we don't have geo here so use a reasonable default
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-            openFraction = openFraction > 0.01 ? 0 : 0.75
+            openFraction = openFraction > 0.01 ? 0 : 1
         }
     }
 
     private func closeSidebar() {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
             openFraction = 0
+        }
+    }
+}
+
+private struct CardEffectModifier: ViewModifier {
+    let fraction: CGFloat
+
+    func body(content: Content) -> some View {
+        if fraction < 0.001 {
+            // Fully closed — no clipping, no padding, plain full screen
+            content
+        } else {
+            content
+                .clipShape(RoundedRectangle(cornerRadius: fraction * 20, style: .continuous))
+                .shadow(color: .black.opacity(Double(fraction) * 0.15), radius: 16, x: -4, y: 0)
+                .padding(.vertical, fraction * 8)
+                .padding(.trailing, fraction * 4)
         }
     }
 }
