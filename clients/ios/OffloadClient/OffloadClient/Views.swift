@@ -22,33 +22,24 @@ struct RootView: View {
     @State private var showingSettings = false
     @State private var navPath = NavigationPath()
 
-    // 0 = closed, 1 = sidebar open (side-by-side), 2 = sidebar extended (full screen)
-    @State private var openFraction: CGFloat = 0
+    // chatOffset: 0 = chat fullscreen, sidebarWidth = sidebar shown, screenWidth = sidebar extended
+    @State private var chatOffset: CGFloat = 0
     private let sidebarWidth: CGFloat = 300
+    private let gap: CGFloat = 8
+    private let cardInset: CGFloat = 8
 
     var body: some View {
         GeometryReader { geo in
             let screenWidth = geo.size.width
-
-            // Sidebar width: 0 → sidebarWidth (fraction 0→1), then sidebarWidth → screenWidth (fraction 1→2)
-            let sidebarW: CGFloat = {
-                if openFraction <= 1 {
-                    return openFraction * sidebarWidth
-                } else {
-                    let extra = openFraction - 1
-                    return sidebarWidth + extra * (screenWidth - sidebarWidth)
-                }
-            }()
-            let chatW = max(screenWidth - sidebarW - (openFraction > 0.01 ? 8 : 0), 0)
-            let chatVisible = chatW > 30
-
-            let f = min(openFraction, 1.0)  // clamp to 0-1 for visual effects
+            // fraction 0→1 for card effects (clamped)
+            let f = min(chatOffset / sidebarWidth, 1.0)
+            let isOpen = chatOffset > 1
 
             ZStack(alignment: .leading) {
-                // Background — only visible when cards separate
+                // Layer 0: Gray base
                 Color(.systemGroupedBackground).ignoresSafeArea()
 
-                // Sidebar
+                // Layer 1: Sidebar (full width, fixed in place)
                 ChatSidebarView(model: model, showingSettings: $showingSettings, onDismiss: {
                     closeSidebar()
                 }, onOpenProject: { path, name in
@@ -58,10 +49,20 @@ struct RootView: View {
                         navPath.append(ProjectNavItem(path: path, name: name))
                     }
                 })
-                .frame(width: sidebarW)
+                .padding(.top, geo.safeAreaInsets.top)
+                .padding(.bottom, geo.safeAreaInsets.bottom)
+                .frame(width: screenWidth)
                 .ignoresSafeArea()
 
-                // Chat card
+                // Layer 2: White bezel (moves + scales with chat, hides card corners when closed)
+                // cornerRadius slightly larger than card's so it wraps around card corners
+                RoundedRectangle(cornerRadius: f * 24, style: .continuous)
+                    .fill(Color(.systemBackground))
+                    .ignoresSafeArea()
+                    .scaleEffect(1.0 - f * 0.055)  // slightly less shrink than card → wraps around
+                    .offset(x: chatOffset)
+
+                // Layer 3: Chat card (fixed width, rounded, moves + scales with offset)
                 NavigationStack(path: $navPath) {
                     ChatView(model: model)
                         .toolbar {
@@ -90,40 +91,36 @@ struct RootView: View {
                         }
                 }
                 .frame(width: screenWidth)
-                .modifier(CardEffectModifier(fraction: f))
-                .offset(x: sidebarW + f * 8)
-                .allowsHitTesting(openFraction < 0.01)
-                .onTapGesture {
-                    if openFraction > 0.01 { closeSidebar() }
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .scaleEffect(1.0 - f * 0.06)
+                .shadow(color: .black.opacity(Double(f) * 0.15), radius: 16, x: -4)
+                .offset(x: chatOffset)
+                .allowsHitTesting(!isOpen)
+                .overlay {
+                    if isOpen {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture { closeSidebar() }
+                    }
                 }
             }
             .gesture(
                 DragGesture(minimumDistance: 12, coordinateSpace: .global)
                     .onChanged { value in
                         let isFromEdge = value.startLocation.x < 30
-                        let isOpen = openFraction > 0.01
+                        let isShowing = chatOffset > 1
                         let isHorizontal = abs(value.translation.width) > abs(value.translation.height)
 
-                        guard (isFromEdge || isOpen) && isHorizontal else { return }
+                        guard (isFromEdge || isShowing) && isHorizontal else { return }
 
-                        // Map drag to fraction: full screen width = 2 units
-                        let drag = value.translation.width / (screenWidth * 0.5)
-                        let newFraction = (isFromEdge && !isOpen) ? drag : openFraction + drag
-                        openFraction = min(max(newFraction, 0), 2)
+                        let newOffset = (isFromEdge && !isShowing)
+                            ? value.translation.width
+                            : chatOffset + value.translation.width
+                        chatOffset = min(max(newOffset, 0), screenWidth)
                     }
                     .onEnded { value in
-                        let predicted = value.predictedEndTranslation.width / (screenWidth * 0.5)
-                        let target = openFraction + predicted * 0.3
-
-                        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                            if target > 1.5 {
-                                openFraction = 2  // extended full screen
-                            } else if target > 0.4 {
-                                openFraction = 1  // side-by-side
-                            } else {
-                                openFraction = 0  // closed
-                            }
-                        }
+                        let predicted = chatOffset + (value.predictedEndTranslation.width - value.translation.width) * 0.5
+                        snap(predicted: predicted, screenWidth: screenWidth)
                     }
             )
         }
@@ -135,32 +132,40 @@ struct RootView: View {
         }
     }
 
+    private func snap(predicted: CGFloat, screenWidth: CGFloat) {
+        let midExpand = (sidebarWidth + screenWidth) / 2
+        let midOpen = sidebarWidth / 2
+
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+            if predicted > midExpand {
+                chatOffset = screenWidth  // extended
+            } else if predicted > midOpen {
+                chatOffset = sidebarWidth  // side-by-side
+            } else {
+                chatOffset = 0  // closed
+            }
+        }
+    }
+
     private func toggleSidebar() {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-            openFraction = openFraction > 0.01 ? 0 : 1
+            if chatOffset < 1 {
+                chatOffset = sidebarWidth
+            } else if chatOffset > sidebarWidth + 1 {
+                chatOffset = sidebarWidth
+            } else {
+                chatOffset = 0
+            }
         }
     }
 
     private func closeSidebar() {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-            openFraction = 0
-        }
-    }
-}
-
-private struct CardEffectModifier: ViewModifier {
-    let fraction: CGFloat
-
-    func body(content: Content) -> some View {
-        if fraction < 0.001 {
-            // Fully closed — no clipping, no padding, plain full screen
-            content
-        } else {
-            content
-                .clipShape(RoundedRectangle(cornerRadius: fraction * 20, style: .continuous))
-                .shadow(color: .black.opacity(Double(fraction) * 0.15), radius: 16, x: -4, y: 0)
-                .padding(.vertical, fraction * 8)
-                .padding(.trailing, fraction * 4)
+            if chatOffset > sidebarWidth + 1 {
+                chatOffset = sidebarWidth  // extended → side-by-side
+            } else {
+                chatOffset = 0  // side-by-side → closed
+            }
         }
     }
 }
