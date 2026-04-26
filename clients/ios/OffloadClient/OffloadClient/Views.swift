@@ -48,7 +48,7 @@ struct RootView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                         navPath.append(ProjectNavItem(path: path, name: name))
                     }
-                })
+                }, expandFraction: max((chatOffset - sidebarWidth) / (screenWidth - sidebarWidth), 0))
                 .padding(.top, geo.safeAreaInsets.top)
                 .padding(.bottom, geo.safeAreaInsets.bottom)
                 .frame(width: screenWidth)
@@ -182,6 +182,7 @@ private struct ChatSidebarView: View {
     @Binding var showingSettings: Bool
     var onDismiss: () -> Void
     var onOpenProject: (String, String) -> Void
+    var expandFraction: CGFloat = 0  // 0 = compact (300pt), 1 = full screen
 
     private var projectSessions: [(project: String, name: String, sessions: [ChatSessionSummary])] {
         let grouped = Dictionary(grouping: model.chatSessions.filter { $0.project != nil }) { $0.project! }
@@ -215,6 +216,8 @@ private struct ChatSidebarView: View {
 
     @State private var showingDashboard = false
 
+    private var isExtended: Bool { expandFraction > 0.5 }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header — tappable to open dashboard
@@ -224,7 +227,7 @@ private struct ChatSidebarView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("Offload")
-                            .font(.title2.weight(.bold))
+                            .font(isExtended ? .title.weight(.bold) : .title2.weight(.bold))
                             .foregroundStyle(.primary)
                         Spacer()
                         Button { showingSettings = true } label: {
@@ -240,6 +243,18 @@ private struct ChatSidebarView: View {
                         Text(model.statusMessage)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if isExtended {
+                            Text("·")
+                                .foregroundStyle(.tertiary)
+                            Text("\(model.projects.filter { $0.isInitialized }.count) projects")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text("·")
+                                .foregroundStyle(.tertiary)
+                            Text("\(model.chatSessions.count) chats")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         Spacer()
                         Image(systemName: "chevron.right")
                             .font(.caption2)
@@ -247,7 +262,7 @@ private struct ChatSidebarView: View {
                     }
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.vertical, isExtended ? 16 : 12)
                 .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
                 .padding(.horizontal, 12)
                 .padding(.top, 12)
@@ -264,58 +279,72 @@ private struct ChatSidebarView: View {
                 if !model.projects.isEmpty {
                     Section {
                         ForEach(model.projects.filter { $0.isInitialized }) { project in
+                            let count = projectSessionCount(for: project.path)
+                            let isExpanded = expandedProjects.contains(project.path) || isExtended
+
                             // Project row
                             HStack(spacing: 10) {
-                                // Tap project name → push dashboard on main view
                                 Button {
                                     onOpenProject(project.path, project.name)
                                 } label: {
                                     HStack(spacing: 8) {
                                         Image(systemName: "folder.fill")
                                             .foregroundStyle(Color.accentColor)
-                                            .font(.body)
-                                        Text(project.name)
-                                            .font(.subheadline)
-                                            .foregroundStyle(.primary)
+                                            .font(isExtended ? .title3 : .body)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(project.name)
+                                                .font(isExtended ? .body.weight(.medium) : .subheadline)
+                                                .foregroundStyle(.primary)
+                                            if isExtended, let summary = project.summary, !summary.isEmpty {
+                                                Text(summary)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                                    .lineLimit(2)
+                                            }
+                                        }
                                     }
                                 }
                                 .buttonStyle(.plain)
 
                                 Spacer()
 
-                                // Tap count badge → expand/collapse sessions
-                                let count = projectSessionCount(for: project.path)
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        if expandedProjects.contains(project.path) {
-                                            expandedProjects.remove(project.path)
-                                        } else {
-                                            expandedProjects.insert(project.path)
+                                if !isExtended {
+                                    Button {
+                                        withAnimation(.easeInOut(duration: 0.2)) {
+                                            if expandedProjects.contains(project.path) {
+                                                expandedProjects.remove(project.path)
+                                            } else {
+                                                expandedProjects.insert(project.path)
+                                            }
                                         }
-                                    }
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        if count > 0 {
-                                            Text("\(count)")
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            if count > 0 {
+                                                Text("\(count)")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            Image(systemName: expandedProjects.contains(project.path) ? "chevron.down" : "chevron.right")
                                                 .font(.caption2)
-                                                .foregroundStyle(.secondary)
+                                                .foregroundStyle(.tertiary)
                                         }
-                                        Image(systemName: expandedProjects.contains(project.path) ? "chevron.down" : "chevron.right")
-                                            .font(.caption2)
-                                            .foregroundStyle(.tertiary)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(Color(.systemGray5), in: Capsule())
                                     }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Color(.systemGray5), in: Capsule())
+                                    .buttonStyle(.plain)
+                                } else {
+                                    Text("\(count) chats")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
                                 }
-                                .buttonStyle(.plain)
                             }
 
-                            // Expanded sessions for this project
-                            if expandedProjects.contains(project.path) {
+                            // Sessions — auto-expanded in extended mode
+                            if isExpanded {
                                 ForEach(sessionsForProject(project.path)) { session in
                                     ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID)
-                                        .padding(.leading, 20)
+                                        .padding(.leading, isExtended ? 28 : 20)
                                         .contentShape(Rectangle())
                                         .onTapGesture {
                                             model.selectChatSession(session.sessionId)
