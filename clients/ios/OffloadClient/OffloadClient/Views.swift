@@ -22,47 +22,30 @@ struct RootView: View {
     @State private var showingSettings = false
     @State private var navPath = NavigationPath()
 
-    // chatOffset: 0 = chat fullscreen, sidebarWidth = sidebar shown, screenWidth = sidebar extended
+    // chatOffset: -screenWidth..-panelWidth = right panel, 0 = fullscreen, sidebarWidth..screenWidth = sidebar
     @State private var chatOffset: CGFloat = 0
     private let sidebarWidth: CGFloat = 300
-    private let gap: CGFloat = 8
-    private let cardInset: CGFloat = 8
+    private let panelWidth: CGFloat = 300
 
     var body: some View {
         GeometryReader { geo in
             let screenWidth = geo.size.width
-            // fraction 0→1 for card effects (clamped)
-            let f = min(chatOffset / sidebarWidth, 1.0)
-            let isOpen = chatOffset > 1
+            // f: 0→1 card effect intensity (works for both directions)
+            let f = min(abs(chatOffset) / min(sidebarWidth, panelWidth), 1.0)
+            let isOpen = abs(chatOffset) > 1
 
             ZStack(alignment: .leading) {
                 // Layer 0: Gray base
                 Color(.systemGroupedBackground).ignoresSafeArea()
 
-                // Layer 1: Sidebar (full width, fixed in place)
-                ChatSidebarView(model: model, showingSettings: $showingSettings, onDismiss: {
-                    closeSidebar()
-                }, onOpenProject: { path, name in
-                    closeSidebar()
-                    navPath = NavigationPath()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                        navPath.append(ProjectNavItem(path: path, name: name))
-                    }
-                }, expandFraction: max((chatOffset - sidebarWidth) / (screenWidth - sidebarWidth), 0))
-                .padding(.top, geo.safeAreaInsets.top)
-                .padding(.bottom, geo.safeAreaInsets.bottom)
-                .frame(width: screenWidth)
-                .ignoresSafeArea()
-
-                // Layer 2: White bezel (moves + scales with chat, hides card corners when closed)
-                // cornerRadius slightly larger than card's so it wraps around card corners
+                // Layer 1: White bezel
                 RoundedRectangle(cornerRadius: f * 24, style: .continuous)
                     .fill(Color(.systemBackground))
                     .ignoresSafeArea()
-                    .scaleEffect(1.0 - f * 0.055)  // slightly less shrink than card → wraps around
+                    .scaleEffect(1.0 - f * 0.055)
                     .offset(x: chatOffset)
 
-                // Layer 3: Chat card (fixed width, rounded, moves + scales with offset)
+                // Layer 2: Chat card
                 NavigationStack(path: $navPath) {
                     ChatView(model: model)
                         .toolbar {
@@ -76,10 +59,8 @@ struct RootView: View {
                                 ProjectPickerPill(model: model)
                             }
                             ToolbarItem(placement: .navigationBarTrailing) {
-                                Button {
-                                    Task { await model.createChatSession() }
-                                } label: {
-                                    Image(systemName: "square.and.pencil")
+                                Button { toggleRightPanel() } label: {
+                                    Image(systemName: "square.stack.3d.up")
                                         .font(.body.weight(.medium))
                                 }
                             }
@@ -93,34 +74,66 @@ struct RootView: View {
                 .frame(width: screenWidth)
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .scaleEffect(1.0 - f * 0.06)
-                .shadow(color: .black.opacity(Double(f) * 0.15), radius: 16, x: -4)
+                .shadow(color: .black.opacity(Double(f) * 0.15), radius: 16, x: chatOffset > 0 ? -4 : 4)
                 .offset(x: chatOffset)
                 .allowsHitTesting(!isOpen)
-                .overlay {
-                    if isOpen {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .onTapGesture { closeSidebar() }
-                    }
+
+                // Layer 3: Panels (on top so they receive touches)
+                if chatOffset > 0 {
+                    ChatSidebarView(model: model, showingSettings: $showingSettings, onDismiss: {
+                        closePanel()
+                    }, onOpenProject: { path, name in
+                        closePanel()
+                        navPath = NavigationPath()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            navPath.append(ProjectNavItem(path: path, name: name))
+                        }
+                    }, expandFraction: max((chatOffset - sidebarWidth) / (screenWidth - sidebarWidth), 0))
+                    .padding(.top, geo.safeAreaInsets.top)
+                    .padding(.bottom, geo.safeAreaInsets.bottom)
+                    .frame(width: chatOffset)
+                    .clipped()
+                    .ignoresSafeArea()
+                } else if chatOffset < 0 {
+                    RightPanelView(model: model, expandFraction: max((-chatOffset - panelWidth) / (screenWidth - panelWidth), 0), onDismiss: { closePanel() })
+                        .padding(.top, geo.safeAreaInsets.top)
+                        .padding(.bottom, geo.safeAreaInsets.bottom)
+                        .frame(width: -chatOffset)
+                        .clipped()
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .ignoresSafeArea()
                 }
             }
             .gesture(
                 DragGesture(minimumDistance: 12, coordinateSpace: .global)
                     .onChanged { value in
-                        let isFromEdge = value.startLocation.x < 30
-                        let isShowing = chatOffset > 1
+                        let isFromLeftEdge = value.startLocation.x < 30
+                        let isFromRightEdge = value.startLocation.x > screenWidth - 30
+                        let isShowing = abs(chatOffset) > 1
                         let isHorizontal = abs(value.translation.width) > abs(value.translation.height)
 
-                        guard (isFromEdge || isShowing) && isHorizontal else { return }
+                        guard (isFromLeftEdge || isFromRightEdge || isShowing) && isHorizontal else { return }
 
-                        let newOffset = (isFromEdge && !isShowing)
-                            ? value.translation.width
-                            : chatOffset + value.translation.width
-                        chatOffset = min(max(newOffset, 0), screenWidth)
+                        let newOffset: CGFloat
+                        if isShowing {
+                            newOffset = chatOffset + value.translation.width
+                        } else {
+                            newOffset = value.translation.width
+                        }
+
+                        // Clamp: if sidebar is open (>0), don't allow going negative; vice versa
+                        if chatOffset > 0 {
+                            chatOffset = min(max(newOffset, 0), screenWidth)
+                        } else if chatOffset < 0 {
+                            chatOffset = min(max(newOffset, -screenWidth), 0)
+                        } else {
+                            // From closed: direction determined by drag
+                            chatOffset = min(max(newOffset, -screenWidth), screenWidth)
+                        }
                     }
                     .onEnded { value in
                         let predicted = chatOffset + (value.predictedEndTranslation.width - value.translation.width) * 0.5
-                        snap(predicted: predicted, screenWidth: screenWidth)
+                        snapBidirectional(predicted: predicted, screenWidth: screenWidth)
                     }
             )
         }
@@ -132,24 +145,27 @@ struct RootView: View {
         }
     }
 
-    private func snap(predicted: CGFloat, screenWidth: CGFloat) {
-        let midExpand = (sidebarWidth + screenWidth) / 2
-        let midOpen = sidebarWidth / 2
-
+    private func snapBidirectional(predicted: CGFloat, screenWidth: CGFloat) {
         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-            if predicted > midExpand {
-                chatOffset = screenWidth  // extended
-            } else if predicted > midOpen {
-                chatOffset = sidebarWidth  // side-by-side
+            if predicted > (sidebarWidth + screenWidth) / 2 {
+                chatOffset = screenWidth           // sidebar extended
+            } else if predicted > sidebarWidth / 2 {
+                chatOffset = sidebarWidth           // sidebar shown
+            } else if predicted < -(panelWidth + screenWidth) / 2 {
+                chatOffset = -screenWidth           // right panel extended
+            } else if predicted < -panelWidth / 2 {
+                chatOffset = -panelWidth            // right panel shown
             } else {
-                chatOffset = 0  // closed
+                chatOffset = 0                     // closed
             }
         }
     }
 
     private func toggleSidebar() {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-            if chatOffset < 1 {
+            if chatOffset < -1 {
+                chatOffset = 0  // close right panel first
+            } else if chatOffset < 1 {
                 chatOffset = sidebarWidth
             } else if chatOffset > sidebarWidth + 1 {
                 chatOffset = sidebarWidth
@@ -159,12 +175,28 @@ struct RootView: View {
         }
     }
 
-    private func closeSidebar() {
+    private func toggleRightPanel() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            if chatOffset > 1 {
+                chatOffset = 0  // close sidebar first
+            } else if chatOffset > -1 {
+                chatOffset = -panelWidth
+            } else if chatOffset < -panelWidth - 1 {
+                chatOffset = -panelWidth
+            } else {
+                chatOffset = 0
+            }
+        }
+    }
+
+    private func closePanel() {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
             if chatOffset > sidebarWidth + 1 {
-                chatOffset = sidebarWidth  // extended → side-by-side
+                chatOffset = sidebarWidth
+            } else if chatOffset < -panelWidth - 1 {
+                chatOffset = -panelWidth
             } else {
-                chatOffset = 0  // side-by-side → closed
+                chatOffset = 0
             }
         }
     }
@@ -471,6 +503,163 @@ private struct ConnectionStatusView: View {
         case "Connected": return .green
         case "Disconnected": return .red
         default: return .orange
+        }
+    }
+}
+
+// MARK: - Right Panel (Devices, Processing, Terminal)
+
+private struct RightPanelView: View {
+    @ObservedObject var model: AppModel
+    var expandFraction: CGFloat = 0  // 0 = compact, 1 = full screen
+    var onDismiss: () -> Void
+
+    private var isExtended: Bool { expandFraction > 0.5 }
+
+    // Current session's project
+    private var currentProject: String? {
+        guard let sid = model.selectedChatSessionID,
+              let session = model.chatSessions.first(where: { $0.sessionId == sid }) else { return nil }
+        return session.project
+    }
+
+    private var relevantTopics: [TopicSummary] {
+        if isExtended {
+            return model.topics
+        }
+        guard let project = currentProject else { return [] }
+        return model.topics.filter { $0.project == project }
+    }
+
+    private var activeTopics: [TopicSummary] {
+        relevantTopics.filter { $0.executionState == .implementing || $0.executionState == .queued }
+    }
+
+    private var pendingTopics: [TopicSummary] {
+        relevantTopics.filter { $0.decisionState == .needsFeedback || $0.decisionState == .pendingImplementation }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text(isExtended ? "All Activity" : "Activity")
+                    .font(isExtended ? .title.weight(.bold) : .title2.weight(.bold))
+                Spacer()
+                Button { onDismiss() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+
+            if let project = currentProject, !isExtended {
+                HStack(spacing: 6) {
+                    Image(systemName: "folder.fill")
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
+                    Text(model.projects.first { $0.path == project }?.name ?? (project as NSString).lastPathComponent)
+                        .font(.caption.weight(.medium))
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
+
+            List {
+                // Processing / Active
+                if !activeTopics.isEmpty {
+                    Section {
+                        ForEach(activeTopics) { topic in
+                            HStack(spacing: 10) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(topic.title)
+                                        .font(.subheadline.weight(.medium))
+                                        .lineLimit(1)
+                                    Text(String(describing: topic.executionState))
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
+                                }
+                                Spacer()
+                            }
+                        }
+                    } header: {
+                        Label("Processing", systemImage: "bolt.fill")
+                    }
+                }
+
+                // Pending feedback / action needed
+                if !pendingTopics.isEmpty {
+                    Section {
+                        ForEach(pendingTopics) { topic in
+                            HStack(spacing: 10) {
+                                Image(systemName: "exclamationmark.circle.fill")
+                                    .foregroundStyle(.orange)
+                                    .font(.body)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(topic.title)
+                                        .font(.subheadline.weight(.medium))
+                                        .lineLimit(1)
+                                    Text(String(describing: topic.decisionState))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                            }
+                        }
+                    } header: {
+                        Label("Needs Attention", systemImage: "hand.raised.fill")
+                    }
+                }
+
+                // All topics summary
+                Section {
+                    HStack {
+                        Text("Total")
+                        Spacer()
+                        Text("\(relevantTopics.count)")
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Active")
+                        Spacer()
+                        Text("\(relevantTopics.filter { $0.decisionState != .archived }.count)")
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Completed")
+                        Spacer()
+                        Text("\(relevantTopics.filter { $0.executionState == .passed }.count)")
+                            .foregroundStyle(.green)
+                    }
+                } header: {
+                    Label(isExtended ? "All Topics" : "Topics", systemImage: "list.bullet")
+                }
+
+                // Server status
+                Section {
+                    HStack {
+                        Circle()
+                            .fill(model.statusMessage == "Connected" ? Color.green : Color.red)
+                            .frame(width: 8, height: 8)
+                        Text(model.statusMessage)
+                            .font(.subheadline)
+                        Spacer()
+                        Text(model.serverURLString)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                } header: {
+                    Label("Server", systemImage: "server.rack")
+                }
+            }
+            .listStyle(.plain)
         }
     }
 }
