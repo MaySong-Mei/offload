@@ -3,8 +3,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import pty
 import queue
+import select
 import socket
+import struct
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -66,6 +70,19 @@ def make_handler():
                 if not self._authorize():
                     return
                 self._handle_websocket()
+                return
+            if parsed.path == "/pty":
+                # Accept auth via header OR query param (JS WebSocket can't set headers)
+                query = parse_qs(parsed.query)
+                token_from_query = query.get("token", [None])[0]
+                if token_from_query:
+                    self.headers["Authorization"] = f"Bearer {token_from_query}"
+                if not self._authorize():
+                    return
+                cwd = query.get("cwd", [None])[0]
+                cols = int(query.get("cols", ["80"])[0])
+                rows = int(query.get("rows", ["24"])[0])
+                self._handle_websocket_pty(cwd=cwd, cols=cols, rows=rows)
                 return
             if not self._authorize():
                 return
@@ -222,7 +239,8 @@ def make_handler():
                     return
                 if parsed.path == "/chat/sessions":
                     project = payload.get("project")  # None for free-floating
-                    session = self.server.service.create_chat_session(project=project)
+                    adapter_type = payload.get("adapter_type", "claude_code")
+                    session = self.server.service.create_chat_session(project=project, adapter_type=adapter_type)
                     self._write_json(HTTPStatus.CREATED, session)
                     return
                 # Match /chat/sessions/<id>/messages
@@ -537,6 +555,132 @@ def make_handler():
             finally:
                 self.server.service.event_bus.unsubscribe(subscriber_id)
 
+        def _handle_websocket_pty(self, cwd: str | None = None, cols: int = 80, rows: int = 24) -> None:
+            """WebSocket endpoint that spawns a pty and bridges I/O."""
+            self.log_message("PTY WebSocket upgrade from %s", self.address_string())
+            key = self.headers.get("Sec-WebSocket-Key")
+            if not key:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing Sec-WebSocket-Key"})
+                return
+            accept = base64.b64encode(
+                hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("utf-8")).digest()
+            ).decode("utf-8")
+            response = (
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+            ).encode("utf-8")
+            self.request.sendall(response)
+
+            # Determine working directory
+            work_dir = cwd or os.path.expanduser("~")
+            if not os.path.isdir(work_dir):
+                work_dir = os.path.expanduser("~")
+
+            # Spawn pty with fork
+            import fcntl
+            import termios
+            child_pid, master_fd = pty.fork()
+            if child_pid == 0:
+                # Child process: exec shell
+                os.chdir(work_dir)
+                shell = os.environ.get("SHELL", "/bin/zsh")
+                os.execvpe(shell, [shell, "-l"], os.environ)
+                # Never reached
+                os._exit(1)
+
+            # Parent: set terminal size
+            winsize = struct.pack("HHHH", rows, cols, 0, 0)
+            fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+
+            # Make master_fd non-blocking
+            flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+            fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+            stop_event = threading.Event()
+            self.connection.settimeout(1.0)
+
+            def ws_reader() -> None:
+                """Read WebSocket frames and write to pty master."""
+                while not stop_event.is_set():
+                    try:
+                        frame = _read_frame(self.connection)
+                    except (ConnectionError, OSError):
+                        stop_event.set()
+                        return
+                    if frame is None:
+                        continue
+                    opcode, payload = frame
+                    if opcode == 0x8:  # close
+                        stop_event.set()
+                        return
+                    if opcode == 0x9:  # ping → pong
+                        try:
+                            self.connection.sendall(_encode_frame(payload.decode("utf-8", errors="replace"), opcode=0xA))
+                        except OSError:
+                            stop_event.set()
+                            return
+                        continue
+                    if opcode == 0x1:  # text
+                        text = payload.decode("utf-8", errors="replace")
+                        # Handle resize messages: {"type":"resize","cols":N,"rows":N}
+                        if text.startswith("{"):
+                            try:
+                                msg = json.loads(text)
+                                if msg.get("type") == "resize":
+                                    new_cols = int(msg.get("cols", cols))
+                                    new_rows = int(msg.get("rows", rows))
+                                    winsize = struct.pack("HHHH", new_rows, new_cols, 0, 0)
+                                    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+                                    continue
+                            except (json.JSONDecodeError, ValueError):
+                                pass
+                        # Regular input: write to pty
+                        try:
+                            os.write(master_fd, payload)
+                        except OSError:
+                            stop_event.set()
+                            return
+                    elif opcode == 0x2:  # binary
+                        try:
+                            os.write(master_fd, payload)
+                        except OSError:
+                            stop_event.set()
+                            return
+
+            reader_thread = threading.Thread(target=ws_reader, daemon=True)
+            reader_thread.start()
+
+            # Main thread: read pty output and send over WebSocket
+            try:
+                while not stop_event.is_set():
+                    readable, _, _ = select.select([master_fd], [], [], 0.1)
+                    if master_fd in readable:
+                        try:
+                            data = os.read(master_fd, 4096)
+                        except OSError:
+                            break
+                        if not data:
+                            break
+                        # Send as binary WebSocket frame
+                        frame_bytes = _encode_binary_frame(data)
+                        self.request.sendall(frame_bytes)
+            except OSError:
+                pass
+            finally:
+                stop_event.set()
+                os.close(master_fd)
+                try:
+                    os.kill(child_pid, 9)
+                    os.waitpid(child_pid, 0)
+                except OSError:
+                    pass
+                try:
+                    self.request.close()
+                except OSError:
+                    pass
+
         def _handle_websocket(self) -> None:
             self.log_message("WebSocket upgrade from %s", self.address_string())
             key = self.headers.get("Sec-WebSocket-Key")
@@ -629,6 +773,22 @@ def _read_frame(sock: socket.socket):
     if masked and payload:
         payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
     return opcode, payload
+
+
+def _encode_binary_frame(data: bytes) -> bytes:
+    """Encode a binary WebSocket frame (opcode 0x2)."""
+    header = bytearray()
+    header.append(0x80 | 0x2)
+    length = len(data)
+    if length < 126:
+        header.append(length)
+    elif length < 2**16:
+        header.append(126)
+        header.extend(length.to_bytes(2, "big"))
+    else:
+        header.append(127)
+        header.extend(length.to_bytes(8, "big"))
+    return bytes(header) + data
 
 
 def _encode_frame(text: str, opcode: int = 0x1) -> bytes:

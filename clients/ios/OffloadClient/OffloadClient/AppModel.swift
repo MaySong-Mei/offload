@@ -35,6 +35,27 @@ final class AppModel: ObservableObject {
     @Published var selectedChatSessionID: String?
     @Published var chatMessages: [ChatMessage] = []
     @Published var isChatStreaming = false
+    @Published var isAgentWorking = false
+
+    /// Best-effort project path: current session's project → selected key → first initialized
+    var defaultProjectPath: String? {
+        if let sid = selectedChatSessionID,
+           let session = chatSessions.first(where: { $0.sessionId == sid }),
+           let p = session.project, !p.isEmpty {
+            return p
+        }
+        if let key = selectedProjectKey, !key.isEmpty { return key }
+        return projects.first(where: { $0.isInitialized })?.path
+    }
+
+    // Terminal
+    @Published var terminalProjectPath: String?
+    @Published var showTerminal = false
+
+    func openTerminal(for projectPath: String? = nil) {
+        terminalProjectPath = projectPath ?? selectedProjectKey
+        showTerminal = true
+    }
 
     // Combined list: server-discovered projects + projects referenced by topics + ungrouped slot
     var allProjectGroups: [(key: String, name: String, hasReadme: Bool, topicCount: Int)] {
@@ -196,9 +217,12 @@ final class AppModel: ObservableObject {
                 selectedTopicDetail = try await client.fetchTopicDetail(topicID: selectedTopicID)
                 try? await localStore.saveTopicDetail(selectedTopicDetail!, topicID: selectedTopicID)
             }
-            // Load chat sessions
+            // Load chat sessions and restore last active session
             if let sessions = try? await client.fetchChatSessions() {
                 chatSessions = sessions
+                if selectedChatSessionID == nil, let latest = sessions.first {
+                    selectChatSession(latest.sessionId)
+                }
             }
 
             statusMessage = "Connected"
@@ -284,8 +308,22 @@ final class AppModel: ObservableObject {
     }
 
     func sendChatMessage(_ message: String) async {
-        guard let sessionID = selectedChatSessionID else { return }
         guard let client = makeClient() else { return }
+
+        // Auto-create session if none selected
+        if selectedChatSessionID == nil {
+            do {
+                let project = defaultProjectPath
+                let session = try await client.createChatSession(project: project)
+                chatSessions.insert(session, at: 0)
+                selectedChatSessionID = session.sessionId
+            } catch {
+                chatMessages.append(ChatMessage(role: "system", content: "Failed to create session: \(error.localizedDescription)"))
+                return
+            }
+        }
+
+        guard let sessionID = selectedChatSessionID else { return }
 
         chatMessages.append(ChatMessage(role: "user", content: message))
         isChatStreaming = true
@@ -701,9 +739,7 @@ final class AppModel: ObservableObject {
                         let isMySession = eventSessionID == self.selectedChatSessionID
 
                         if event.eventType == "chat.status" && isMySession {
-                            if let msg = event.payload?["message"]?.value, msg != "Done" {
-                                self.chatMessages.append(ChatMessage(role: "system", content: msg))
-                            }
+                            // Status messages are transient — don't add to chat history
                         } else if event.eventType == "chat.error" && isMySession {
                             self.isChatStreaming = false
                             if let err = event.payload?["error"]?.value {
@@ -712,18 +748,28 @@ final class AppModel: ObservableObject {
                         } else if event.eventType == "chat.stream" && isMySession {
                             let evtType = event.payload?["claude_event_type"]?.value ?? ""
                             if evtType == "assistant", let text = event.payload?["text"]?.value, !text.isEmpty {
+                                // Orchestrator text — append to streaming message
                                 if let lastIdx = self.chatMessages.indices.last,
                                    self.chatMessages[lastIdx].role == "assistant" && self.chatMessages[lastIdx].isStreaming {
                                     self.chatMessages[lastIdx].content += text
                                 } else {
                                     self.chatMessages.append(ChatMessage(role: "assistant", content: text, isStreaming: true))
                                 }
+                            } else if evtType == "agent_activity" {
+                                // Coding agent started — just set flag, no chat bubble
+                                self.isAgentWorking = true
+                            } else if evtType == "agent_output" {
+                                // Agent output events — handled by the activity indicator
+                            } else if evtType == "agent_done" {
+                                // Coding agent finished
+                                self.isAgentWorking = false
                             } else if evtType == "result" {
                                 if let lastIdx = self.chatMessages.indices.last,
                                    self.chatMessages[lastIdx].role == "assistant" && self.chatMessages[lastIdx].isStreaming {
                                     self.chatMessages[lastIdx].isStreaming = false
                                 }
                                 self.isChatStreaming = false
+                                self.isAgentWorking = false
                             }
                         } else if event.eventType == "chat.done" {
                             if isMySession {

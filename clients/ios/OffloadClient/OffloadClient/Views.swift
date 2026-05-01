@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 // MARK: - Shared Helpers
 
@@ -59,9 +60,15 @@ struct RootView: View {
                                 ProjectPickerPill(model: model)
                             }
                             ToolbarItem(placement: .navigationBarTrailing) {
-                                Button { toggleRightPanel() } label: {
-                                    Image(systemName: "square.stack.3d.up")
-                                        .font(.body.weight(.medium))
+                                HStack(spacing: 16) {
+                                    Button { model.openTerminal() } label: {
+                                        Image(systemName: "terminal")
+                                            .font(.body.weight(.medium))
+                                    }
+                                    Button { toggleRightPanel() } label: {
+                                        Image(systemName: "square.stack.3d.up")
+                                            .font(.body.weight(.medium))
+                                    }
                                 }
                             }
                         }
@@ -139,6 +146,11 @@ struct RootView: View {
         }
         .sheet(isPresented: $showingSettings) {
             SettingsSheet(model: model)
+        }
+        .fullScreenCover(isPresented: $model.showTerminal) {
+            NavigationStack {
+                TerminalView(model: model, projectPath: model.terminalProjectPath)
+            }
         }
         .task {
             model.bootstrap()
@@ -230,7 +242,14 @@ private struct ChatSidebarView: View {
         model.chatSessions.filter { $0.project == nil }
     }
 
-    @State private var expandedProjects: Set<String> = []
+    @State private var expandedProjects: Set<String>? = nil  // nil = not yet initialized
+
+    // Auto-expand projects that have sessions
+    private var effectiveExpanded: Set<String> {
+        if let manual = expandedProjects { return manual }
+        // Default: expand projects that have chat sessions
+        return Set(model.chatSessions.compactMap { $0.project })
+    }
 
     private func projectSessionCount(for path: String) -> Int {
         model.chatSessions.filter { $0.project == path }.count
@@ -312,7 +331,7 @@ private struct ChatSidebarView: View {
                     Section {
                         ForEach(model.projects.filter { $0.isInitialized }) { project in
                             let count = projectSessionCount(for: project.path)
-                            let isExpanded = expandedProjects.contains(project.path) || isExtended
+                            let isExpanded = effectiveExpanded.contains(project.path) || isExtended
 
                             // Project row
                             HStack(spacing: 10) {
@@ -343,11 +362,13 @@ private struct ChatSidebarView: View {
                                 if !isExtended {
                                     Button {
                                         withAnimation(.easeInOut(duration: 0.2)) {
-                                            if expandedProjects.contains(project.path) {
-                                                expandedProjects.remove(project.path)
+                                            var current = effectiveExpanded
+                                            if current.contains(project.path) {
+                                                current.remove(project.path)
                                             } else {
-                                                expandedProjects.insert(project.path)
+                                                current.insert(project.path)
                                             }
+                                            expandedProjects = current
                                         }
                                     } label: {
                                         HStack(spacing: 4) {
@@ -356,7 +377,7 @@ private struct ChatSidebarView: View {
                                                     .font(.caption2)
                                                     .foregroundStyle(.secondary)
                                             }
-                                            Image(systemName: expandedProjects.contains(project.path) ? "chevron.down" : "chevron.right")
+                                            Image(systemName: effectiveExpanded.contains(project.path) ? "chevron.down" : "chevron.right")
                                                 .font(.caption2)
                                                 .foregroundStyle(.tertiary)
                                         }
@@ -390,20 +411,18 @@ private struct ChatSidebarView: View {
                     }
                 }
 
-                // Recents — sessions without a project
-                if !ideaSessions.isEmpty {
-                    Section {
-                        ForEach(ideaSessions) { session in
-                            ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    model.selectChatSession(session.sessionId)
-                                    onDismiss()
-                                }
-                        }
-                    } header: {
-                        Text("Recents")
+                // Recents — all sessions sorted by most recent
+                Section {
+                    ForEach(model.chatSessions) { session in
+                        ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID, projectName: projectName(for: session.project))
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                model.selectChatSession(session.sessionId)
+                                onDismiss()
+                            }
                     }
+                } header: {
+                    Text("Recents")
                 }
             }
             .listStyle(.plain)
@@ -915,6 +934,11 @@ private struct ProjectCard: View {
 
                 if project.isInitialized || project.initStatus == "failed" {
                     Menu {
+                        Button {
+                            model.openTerminal(for: project.path)
+                        } label: {
+                            Label("Open Terminal", systemImage: "terminal")
+                        }
                         if project.initStatus == "ready" {
                             Button {
                                 showingReinitConfirm = true
@@ -1181,6 +1205,11 @@ private struct ProjectDashboardView: View {
         .navigationTitle(projectName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button { model.openTerminal() } label: {
+                    Image(systemName: "terminal")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button { showingNewTopicSheet = true } label: {
@@ -3873,7 +3902,23 @@ struct ChatView: View {
                             ChatBubble(message: message, model: model)
                                 .id(message.id)
                         }
-                        if model.isChatStreaming, let last = model.chatMessages.last,
+                        if model.isAgentWorking {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Image(systemName: "terminal")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                                Text("Agent executing…")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(.orange)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.orange.opacity(0.1), in: Capsule())
+                            .padding(.horizontal)
+                            .id("agent-working")
+                        } else if model.isChatStreaming, let last = model.chatMessages.last,
                            !(last.role == "assistant" && last.isStreaming) {
                             HStack(spacing: 6) {
                                 ProgressView()
@@ -3949,15 +3994,13 @@ private struct ProjectPickerPill: View {
         return model.chatSessions.first { $0.sessionId == sid }
     }
 
-    private var currentProjectName: String? {
-        guard let path = currentSession?.project else { return nil }
-        return model.projects.first { $0.path == path }?.name
-            ?? (path as NSString).lastPathComponent
-    }
-
     private var displayLabel: String {
         if model.isChatStreaming { return "Thinking…" }
-        return currentProjectName ?? "Offload"
+        if let path = model.defaultProjectPath {
+            return model.projects.first { $0.path == path }?.name
+                ?? (path as NSString).lastPathComponent
+        }
+        return "Offload"
     }
 
     var body: some View {
@@ -4032,21 +4075,139 @@ private struct ChatBubble: View {
         } else {
             HStack {
                 if message.role == "user" { Spacer(minLength: 60) }
-                Text(message.content)
-                    .font(.body)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(
-                        message.role == "user"
-                            ? Color.accentColor.opacity(0.15)
-                            : Color(.systemGray6),
-                        in: RoundedRectangle(cornerRadius: 12)
-                    )
-                    .textSelection(.enabled)
+                if message.role == "user" {
+                    Text(message.content)
+                        .font(.body)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+                        .textSelection(.enabled)
+                } else {
+                    MarkdownContentView(text: message.content)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 12))
+                        .textSelection(.enabled)
+                }
                 if message.role == "assistant" { Spacer(minLength: 60) }
             }
             .padding(.horizontal, 12)
         }
+    }
+}
+
+// MARK: - Markdown Rendering
+
+private struct MarkdownContentView: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(parseBlocks(text).enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .code(let lang, let code):
+                    CodeBlockView(language: lang, code: code)
+                case .text(let content):
+                    if !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(inlineMarkdown(content))
+                            .font(.body)
+                    }
+                }
+            }
+        }
+    }
+
+    // Parse text into code blocks and regular text blocks
+    private func parseBlocks(_ input: String) -> [MarkdownBlock] {
+        var blocks: [MarkdownBlock] = []
+        let lines = input.components(separatedBy: "\n")
+        var i = 0
+        var textBuffer: [String] = []
+
+        while i < lines.count {
+            let line = lines[i]
+            if line.hasPrefix("```") {
+                // Flush text buffer
+                if !textBuffer.isEmpty {
+                    blocks.append(.text(textBuffer.joined(separator: "\n")))
+                    textBuffer = []
+                }
+                // Extract language hint
+                let lang = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                var codeLines: [String] = []
+                i += 1
+                while i < lines.count && !lines[i].hasPrefix("```") {
+                    codeLines.append(lines[i])
+                    i += 1
+                }
+                blocks.append(.code(lang.isEmpty ? nil : lang, codeLines.joined(separator: "\n")))
+                i += 1 // skip closing ```
+            } else {
+                textBuffer.append(line)
+                i += 1
+            }
+        }
+        if !textBuffer.isEmpty {
+            blocks.append(.text(textBuffer.joined(separator: "\n")))
+        }
+        return blocks
+    }
+
+    // Convert inline markdown to AttributedString
+    private func inlineMarkdown(_ text: String) -> AttributedString {
+        // Use iOS built-in markdown parsing
+        if let attributed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            return attributed
+        }
+        return AttributedString(text)
+    }
+}
+
+private enum MarkdownBlock {
+    case text(String)
+    case code(String?, String)  // (language, code)
+}
+
+private struct CodeBlockView: View {
+    let language: String?
+    let code: String
+
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header with language label + copy button
+            HStack {
+                if let lang = language, !lang.isEmpty {
+                    Text(lang)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = code
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color(.systemGray5))
+
+            // Code content
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code)
+                    .font(.system(.caption, design: .monospaced))
+                    .padding(10)
+            }
+        }
+        .background(Color(.systemGray5).opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -4101,5 +4262,131 @@ private struct ChatCardView: View {
         }
         .padding(12)
         .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+// MARK: - Terminal
+
+struct TerminalView: View {
+    @ObservedObject var model: AppModel
+    var projectPath: String?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        TerminalWebView(model: model, projectPath: projectPath)
+            .ignoresSafeArea(.all, edges: .bottom)
+            .navigationTitle("Terminal")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+    }
+}
+
+struct TerminalWebView: UIViewRepresentable {
+    @ObservedObject var model: AppModel
+    var projectPath: String?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.userContentController.add(context.coordinator, name: "terminalEvent")
+        // Allow inline media playback
+        config.allowsInlineMediaPlayback = true
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.isOpaque = false
+        webView.backgroundColor = UIColor(red: 0.118, green: 0.118, blue: 0.118, alpha: 1) // #1e1e1e
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.bounces = false
+
+        context.coordinator.webView = webView
+
+        // Load terminal.html from bundle
+        if let htmlURL = Bundle.main.url(forResource: "terminal", withExtension: "html") {
+            webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
+        }
+
+        // Build the WebSocket URL for pty
+        context.coordinator.buildAndConnect(model: model, projectPath: projectPath)
+
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    class Coordinator: NSObject, WKScriptMessageHandler {
+        weak var webView: WKWebView?
+        private var didConnect = false
+
+        func buildAndConnect(model: AppModel, projectPath: String?) {
+            // Wait for page load, then call connectPTY
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.connect(model: model, projectPath: projectPath)
+            }
+        }
+
+        private func connect(model: AppModel, projectPath: String?) {
+            guard let webView = webView else { return }
+            guard !didConnect else { return }
+
+            // Build WebSocket URL from server base URL
+            let baseURL = model.serverURLString.trimmingCharacters(in: .whitespaces)
+            guard !baseURL.isEmpty else { return }
+
+            var wsBase = baseURL
+            if wsBase.hasPrefix("http://") {
+                wsBase = "ws://" + wsBase.dropFirst(7)
+            } else if wsBase.hasPrefix("https://") {
+                wsBase = "wss://" + wsBase.dropFirst(8)
+            } else {
+                wsBase = "ws://" + wsBase
+            }
+            // Remove trailing slash
+            if wsBase.hasSuffix("/") { wsBase = String(wsBase.dropLast()) }
+
+            var ptyURL = "\(wsBase)/pty"
+            var params: [String] = []
+            if let path = projectPath, !path.isEmpty {
+                let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? path
+                params.append("cwd=\(encoded)")
+            }
+            if !model.apiToken.isEmpty {
+                let encoded = model.apiToken.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? model.apiToken
+                params.append("token=\(encoded)")
+            }
+            if !params.isEmpty {
+                ptyURL += "?" + params.joined(separator: "&")
+            }
+
+            let js = "connectPTY('\(ptyURL)');"
+            webView.evaluateJavaScript(js) { _, error in
+                if let error = error {
+                    print("Terminal connect error: \(error)")
+                }
+            }
+            didConnect = true
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: Any],
+                  let type = body["type"] as? String else { return }
+            switch type {
+            case "ready":
+                print("Terminal ready")
+            case "closed":
+                print("Terminal connection closed")
+            default:
+                break
+            }
+        }
     }
 }

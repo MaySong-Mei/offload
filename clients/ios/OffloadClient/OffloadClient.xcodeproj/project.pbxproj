@@ -15,6 +15,7 @@
 		A10000010000000000000006 /* LocalStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000010000000000000018 /* LocalStore.swift */; };
 		A10000010000000000000007 /* PendingOperation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000010000000000000019 /* PendingOperation.swift */; };
 		A10000010000000000000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000001000000000000001A /* Assets.xcassets */; };
+		A10000010000000000000009 /* terminal.html in Resources */ = {isa = PBXBuildFile; fileRef = A1000001000000000000001B /* terminal.html */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,6 +28,7 @@
 		A10000010000000000000018 /* LocalStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalStore.swift; sourceTree = "<group>"; };
 		A10000010000000000000019 /* PendingOperation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingOperation.swift; sourceTree = "<group>"; };
 		A1000001000000000000001A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A1000001000000000000001B /* terminal.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = terminal.html; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -59,6 +61,7 @@
 				A10000010000000000000018 /* LocalStore.swift */,
 				A10000010000000000000019 /* PendingOperation.swift */,
 				A1000001000000000000001A /* Assets.xcassets */,
+				A1000001000000000000001B /* terminal.html */,
 			);
 			path = OffloadClient;
 			sourceTree = "<group>";
@@ -129,6 +132,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000010000000000000008 /* Assets.xcassets in Resources */,
+				A10000010000000000000009 /* terminal.html in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

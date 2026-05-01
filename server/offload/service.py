@@ -26,6 +26,7 @@ from .models import (
     utc_now,
 )
 from .chat import ChatManager
+from .session import OffloadSessionManager
 from .planner import TopicPlanner
 from .repo_offload import RepoOffload
 from .sensor_runner import SensorRunner
@@ -58,7 +59,7 @@ class HarnessService:
         self._run_threads: Dict[str, threading.Thread] = {}
         self._feedback_timers: Dict[str, threading.Timer] = {}
         self._project_paths = project_paths or []
-        self.chat_manager = ChatManager(self.event_bus, self.workspace_root)
+        self.chat_manager = OffloadSessionManager(self.event_bus, self.workspace_root)
         self.sensor_runner = SensorRunner(self.store, self.event_bus, self._project_paths)
         self.reindex()
 
@@ -120,8 +121,8 @@ class HarnessService:
     def list_chat_sessions(self) -> List[Dict[str, Any]]:
         return self.chat_manager.list_sessions()
 
-    def create_chat_session(self, project: Optional[str] = None) -> Dict[str, Any]:
-        session = self.chat_manager.create_session(project=project)
+    def create_chat_session(self, project: Optional[str] = None, adapter_type: str = "claude_code") -> Dict[str, Any]:
+        session = self.chat_manager.create_session(project=project, adapter_type=adapter_type)
         return session.to_summary()
 
     def send_chat_message(self, session_id: str, message: str) -> bool:
