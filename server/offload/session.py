@@ -19,9 +19,6 @@ from .adapters import AgentEvent, ClaudeCodeAdapter, PTYAdapter
 from .event_bus import EventBus
 from .models import EventRecord, utc_now
 
-_SESSION_SYSTEM_PROMPT_PATH = Path(__file__).parent / "templates" / "session_system.md"
-
-
 class OffloadSession:
     """A single offload session backed by a Claude Code process."""
 

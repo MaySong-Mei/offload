@@ -4288,6 +4288,15 @@ struct TerminalView: View {
     }
 }
 
+/// Weak wrapper to avoid WKWebView retain cycle on script message handlers.
+private class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var delegate: WKScriptMessageHandler?
+    init(_ delegate: WKScriptMessageHandler) { self.delegate = delegate }
+    func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
+        delegate?.userContentController(c, didReceive: message)
+    }
+}
+
 struct TerminalWebView: UIViewRepresentable {
     @ObservedObject var model: AppModel
     var projectPath: String?
@@ -4298,7 +4307,7 @@ struct TerminalWebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        config.userContentController.add(context.coordinator, name: "terminalEvent")
+        config.userContentController.add(WeakScriptMessageHandler(context.coordinator), name: "terminalEvent")
         // Allow inline media playback
         config.allowsInlineMediaPlayback = true
 
@@ -4322,6 +4331,10 @@ struct TerminalWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "terminalEvent")
+    }
 
     class Coordinator: NSObject, WKScriptMessageHandler {
         weak var webView: WKWebView?
@@ -4367,10 +4380,14 @@ struct TerminalWebView: UIViewRepresentable {
                 ptyURL += "?" + params.joined(separator: "&")
             }
 
-            let js = "connectPTY('\(ptyURL)');"
-            webView.evaluateJavaScript(js) { _, error in
-                if let error = error {
-                    print("Terminal connect error: \(error)")
+            // JSON-encode the URL to prevent JS injection
+            if let jsonData = try? JSONSerialization.data(withJSONObject: ptyURL),
+               let jsonStr = String(data: jsonData, encoding: .utf8) {
+                let js = "connectPTY(\(jsonStr));"
+                webView.evaluateJavaScript(js) { _, error in
+                    if let error = error {
+                        print("Terminal connect error: \(error)")
+                    }
                 }
             }
             didConnect = true

@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -18,11 +16,12 @@ class ClaudeCodeAdapter:
     ``content_block_delta`` events containing individual text tokens.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, skip_permissions: bool = True) -> None:
         self._cwd: Optional[Path] = None
         self._env: Optional[Dict[str, str]] = None
         self._session_id: Optional[str] = None
         self._proc: Optional[subprocess.Popen] = None
+        self._skip_permissions = skip_permissions
 
     # -- AgentAdapter interface ------------------------------------------------
 
@@ -34,7 +33,6 @@ class ClaudeCodeAdapter:
         self,
         message: str,
         on_event: Optional[EventCallback] = None,
-        system_prompt: Optional[str] = None,
     ) -> str:
         if self._cwd is None:
             raise RuntimeError("Adapter not started — call start(cwd) first")
@@ -47,20 +45,9 @@ class ClaudeCodeAdapter:
             "--output-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
-            "--dangerously-skip-permissions",
         ])
-
-        # Inject offload context via --append-system-prompt-file
-        self._system_prompt_file = None
-        if system_prompt:
-            tf = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".md", prefix="offload-ctx-",
-                delete=False,
-            )
-            tf.write(system_prompt)
-            tf.close()
-            self._system_prompt_file = tf.name
-            cmd.extend(["--append-system-prompt-file", tf.name])
+        if self._skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
 
         self._proc = subprocess.Popen(
             cmd,

@@ -80,6 +80,15 @@ def make_handler():
                 if not self._authorize():
                     return
                 cwd = query.get("cwd", [None])[0]
+                # Validate cwd is under projects root or home
+                if cwd:
+                    scanner_root = self.server.scanner.root
+                    home = str(Path.home())
+                    resolved = str(Path(cwd).resolve())
+                    if scanner_root and not resolved.startswith(str(scanner_root)):
+                        if not resolved.startswith(home):
+                            self._write_json(HTTPStatus.FORBIDDEN, {"error": "cwd not under allowed paths"})
+                            return
                 cols = int(query.get("cols", ["80"])[0])
                 rows = int(query.get("rows", ["24"])[0])
                 self._handle_websocket_pty(cwd=cwd, cols=cols, rows=rows)
