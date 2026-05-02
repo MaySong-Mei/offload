@@ -4086,26 +4086,23 @@ private struct ChatBubble: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 2)
-        } else {
+        } else if message.role == "user" {
             HStack {
-                if message.role == "user" { Spacer(minLength: 60) }
-                if message.role == "user" {
-                    Text(message.content)
-                        .font(.body)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
-                        .textSelection(.enabled)
-                } else {
-                    MarkdownContentView(text: message.content)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 12))
-                        .textSelection(.enabled)
-                }
-                if message.role == "assistant" { Spacer(minLength: 60) }
+                Spacer(minLength: 60)
+                Text(message.content)
+                    .font(.body)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+                    .textSelection(.enabled)
             }
             .padding(.horizontal, 12)
+        } else {
+            // Assistant — no bubble, just text
+            MarkdownContentView(text: message.content)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+                .textSelection(.enabled)
         }
     }
 }
