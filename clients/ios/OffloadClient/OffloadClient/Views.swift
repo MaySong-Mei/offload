@@ -3903,20 +3903,16 @@ struct ChatView: View {
                                 .id(message.id)
                         }
                         if model.isAgentWorking {
-                            HStack(spacing: 8) {
+                            HStack(spacing: 6) {
                                 ProgressView()
                                     .controlSize(.small)
-                                Image(systemName: "terminal")
-                                    .font(.caption)
-                                    .foregroundStyle(.orange)
-                                Text("Agent executing…")
-                                    .font(.caption.weight(.medium))
-                                    .foregroundStyle(.orange)
+                                    .tint(Color(.systemGray))
+                                Text("running...")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(Color(.systemGray))
                             }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(.orange.opacity(0.1), in: Capsule())
-                            .padding(.horizontal)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
                             .id("agent-working")
                         } else if model.isChatStreaming, let last = model.chatMessages.last,
                            !(last.role == "assistant" && last.isStreaming) {
@@ -4121,24 +4117,26 @@ private struct ToolCallBubble: View {
     private var resultText: String? {
         let lines = content.components(separatedBy: "\n")
         guard lines.count > 1 else { return nil }
-        return lines.dropFirst().joined(separator: "\n")
+        return lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Tool header — always visible
-            HStack(spacing: 6) {
+            HStack(spacing: 0) {
                 Text(header)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.orange)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(Color(.systemGray))
                     .lineLimit(1)
                 Spacer()
                 if resultText != nil {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption2)
-                        .foregroundStyle(.orange.opacity(0.6))
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Color(.systemGray3))
                 }
             }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color(.black).opacity(0.04))
             .contentShape(Rectangle())
             .onTapGesture {
                 if resultText != nil {
@@ -4146,19 +4144,23 @@ private struct ToolCallBubble: View {
                 }
             }
 
-            // Expandable result
             if isExpanded, let result = resultText {
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(result)
                         .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .padding(8)
+                        .foregroundStyle(Color(.systemGray))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
                 }
-                .frame(maxHeight: 150)
-                .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 6))
-                .padding(.top, 4)
+                .frame(maxHeight: 120)
+                .background(Color(.black).opacity(0.03))
             }
         }
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color(.systemGray5), lineWidth: 0.5)
+        )
     }
 }
 

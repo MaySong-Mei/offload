@@ -765,12 +765,12 @@ final class AppModel: ObservableObject {
                                 // Coding agent started — just set flag, no chat bubble
                                 self.isAgentWorking = true
                             } else if evtType == "agent_tool_use" {
-                                // CC is using a tool — append each as its own line
+                                // CC is using a tool — render like terminal
                                 let tool = event.payload?["tool"]?.value ?? ""
                                 let preview = event.payload?["input_preview"]?.value ?? ""
-                                let icon = Self.toolIcon(tool)
-                                let label = preview.isEmpty ? tool : "\(preview)"
-                                self.chatMessages.append(ChatMessage(role: "tool", content: "\(icon) \(tool)  \(label)"))
+                                let prefix = tool == "Bash" ? "$" : ">"
+                                let label = preview.isEmpty ? tool.lowercased() : "\(tool.lowercased()) \(preview)"
+                                self.chatMessages.append(ChatMessage(role: "tool", content: "\(prefix) \(label)"))
                             } else if evtType == "agent_tool_result" {
                                 // Tool output — append as collapsible result
                                 let content = event.payload?["content"]?.value ?? ""
@@ -856,14 +856,14 @@ final class AppModel: ObservableObject {
 
     static func toolIcon(_ tool: String) -> String {
         switch tool {
-        case "Read": return "📖"
-        case "Edit": return "✏️"
-        case "Write": return "📝"
-        case "Bash": return "⚡"
-        case "Glob": return "🔍"
-        case "Grep": return "🔎"
-        case "Agent": return "🤖"
-        default: return "🔧"
+        case "Read": return ">"
+        case "Edit": return ">"
+        case "Write": return ">"
+        case "Bash": return "$"
+        case "Glob": return ">"
+        case "Grep": return ">"
+        case "Agent": return ">"
+        default: return ">"
         }
     }
 
