@@ -155,6 +155,8 @@ Core principles:
 
 | Date | Change |
 |------|--------|
+| 2026-05-02 | P1+P2: tool use display, concurrency visibility, session index, timeout, xterm local |
+| 2026-05-02 | P0 complete: cancel, session resilience, CLAUDE.md context |
 | 2026-05-02 | Initial planning doc created from architecture review findings |
 | 2026-05-01 | PR #1: CC-driven sessions, terminal UI, agent adapters, blocker fixes |
 | 2026-04-29 | Branch `feat/terminal-ui` created |
