@@ -139,6 +139,9 @@ class HarnessService:
             topics_summary=topics_summary,
         )
 
+    def list_active_sessions(self) -> List[Dict[str, Any]]:
+        return self.chat_manager.list_active()
+
     def cancel_chat_session(self, session_id: str) -> bool:
         """Cancel a running chat session. Returns False if not running."""
         return self.chat_manager.cancel_session(session_id)

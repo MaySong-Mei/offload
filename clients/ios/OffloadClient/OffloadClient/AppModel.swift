@@ -764,8 +764,21 @@ final class AppModel: ObservableObject {
                             } else if evtType == "agent_activity" {
                                 // Coding agent started — just set flag, no chat bubble
                                 self.isAgentWorking = true
+                            } else if evtType == "agent_tool_use" {
+                                // CC is using a tool — show compact activity line
+                                let tool = event.payload?["tool"]?.value ?? ""
+                                let preview = event.payload?["input_preview"]?.value ?? ""
+                                let icon = Self.toolIcon(tool)
+                                let label = preview.isEmpty ? tool : "\(tool): \(preview)"
+                                // Update or append tool activity message
+                                if let lastIdx = self.chatMessages.indices.last,
+                                   self.chatMessages[lastIdx].role == "tool" {
+                                    self.chatMessages[lastIdx].content = "\(icon) \(label)"
+                                } else {
+                                    self.chatMessages.append(ChatMessage(role: "tool", content: "\(icon) \(label)"))
+                                }
                             } else if evtType == "agent_output" {
-                                // Agent output events — handled by the activity indicator
+                                // Legacy agent output events
                             } else if evtType == "agent_done" {
                                 // Coding agent finished
                                 self.isAgentWorking = false
@@ -834,6 +847,19 @@ final class AppModel: ObservableObject {
             } catch {
                 statusMessage = "Realtime updates offline"
             }
+        }
+    }
+
+    static func toolIcon(_ tool: String) -> String {
+        switch tool {
+        case "Read": return "📖"
+        case "Edit": return "✏️"
+        case "Write": return "📝"
+        case "Bash": return "⚡"
+        case "Glob": return "🔍"
+        case "Grep": return "🔎"
+        case "Agent": return "🤖"
+        default: return "🔧"
         }
     }
 

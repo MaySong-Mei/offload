@@ -67,6 +67,9 @@ class ClaudeCodeAdapter:
         result_text = ""
         expected_session_id = self._session_id  # the id we're trying to resume
         self._resume_failed = False
+        # Track current tool_use for input accumulation
+        _current_tool_name: Optional[str] = None
+        _current_tool_input: List[str] = []
         try:
             while True:
                 line = self._proc.stdout.readline()  # type: ignore[union-attr]
@@ -86,12 +89,44 @@ class ClaudeCodeAdapter:
                     evt = data.get("event", {})
                     evt_type = evt.get("type", "")
 
-                    if evt_type == "content_block_delta":
+                    if evt_type == "content_block_start":
+                        block = evt.get("content_block", {})
+                        if block.get("type") == "tool_use":
+                            _current_tool_name = block.get("name", "")
+                            _current_tool_input = []
+
+                    elif evt_type == "content_block_delta":
                         delta = evt.get("delta", {})
                         if delta.get("type") == "text_delta":
                             text = delta.get("text", "")
                             if text and on_event:
                                 on_event(AgentEvent("text_output", {"text": text}))
+                        elif delta.get("type") == "input_json_delta":
+                            _current_tool_input.append(delta.get("partial_json", ""))
+
+                    elif evt_type == "content_block_stop":
+                        # Emit tool_use event with parsed input
+                        if _current_tool_name and on_event:
+                            input_str = "".join(_current_tool_input)
+                            input_preview = ""
+                            try:
+                                parsed = json.loads(input_str)
+                                # Extract the most useful field for display
+                                input_preview = (
+                                    parsed.get("file_path")
+                                    or parsed.get("command")
+                                    or parsed.get("pattern")
+                                    or parsed.get("query")
+                                    or str(parsed)[:100]
+                                )
+                            except json.JSONDecodeError:
+                                input_preview = input_str[:100]
+                            on_event(AgentEvent("tool_use", {
+                                "tool": _current_tool_name,
+                                "input_preview": str(input_preview)[:150],
+                            }))
+                            _current_tool_name = None
+                            _current_tool_input = []
 
                     # Capture session_id from any stream_event
                     sid = data.get("session_id")

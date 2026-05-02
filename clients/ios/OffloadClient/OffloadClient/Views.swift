@@ -4070,6 +4070,16 @@ private struct ChatBubble: View {
         if let card = message.card {
             ChatCardView(card: card, model: model)
                 .padding(.horizontal, 12)
+        } else if message.role == "tool" {
+            HStack(spacing: 6) {
+                Text(message.content)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 1)
         } else if message.role == "system" {
             HStack {
                 Spacer()

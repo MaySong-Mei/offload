@@ -186,6 +186,9 @@ def make_handler():
                     "active": active.to_dict() if active else None,
                 })
                 return
+            if parsed.path == "/chat/active":
+                self._write_json(HTTPStatus.OK, {"active": self.server.service.list_active_sessions()})
+                return
             if parsed.path == "/agents/status":
                 agents = []
                 for executor in self.server.service.executors.values():

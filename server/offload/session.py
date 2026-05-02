@@ -92,6 +92,7 @@ class OffloadSessionManager:
         self._active: Dict[str, threading.Thread] = {}
         self._adapters: Dict[str, Any] = {}  # session_id → active adapter (for cancel)
         self._cancelled: set = set()  # session_ids that were cancelled
+        self._active_meta: Dict[str, Dict[str, Any]] = {}  # session_id → {started_at, instruction, project}
 
     # ---- API Key (kept for backward compat with iOS settings) ----------------
 
@@ -134,6 +135,7 @@ class OffloadSessionManager:
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(session.to_dict(), indent=2))
         tmp.rename(path)
+        self._update_index(session)
 
     def _load_session(self, session_id: str) -> Optional[OffloadSession]:
         path = self._session_path(session_id)
@@ -145,7 +147,43 @@ class OffloadSessionManager:
         except (json.JSONDecodeError, KeyError):
             return None
 
+    @property
+    def _index_path(self) -> Path:
+        return self._sessions_dir.parent / "index.json"
+
+    def _update_index(self, session: OffloadSession) -> None:
+        """Update the session index with this session's metadata."""
+        index = self._load_index()
+        entry = {
+            "session_id": session.session_id,
+            "title": session.title,
+            "project": session.project,
+            "created_at": session.created_at,
+            "last_message_at": session.last_message_at,
+            "message_count": len(session.messages),
+        }
+        # Replace or append
+        index = [e for e in index if e["session_id"] != session.session_id]
+        index.append(entry)
+        index.sort(key=lambda e: e.get("last_message_at", ""), reverse=True)
+        tmp = self._index_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(index, indent=2))
+        tmp.rename(self._index_path)
+
+    def _load_index(self) -> List[Dict[str, Any]]:
+        if self._index_path.is_file():
+            try:
+                return json.loads(self._index_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+        return []
+
     def list_sessions(self) -> List[Dict[str, Any]]:
+        """List sessions from index (fast) with fallback to full scan."""
+        index = self._load_index()
+        if index:
+            return index
+        # Fallback: rebuild index from session files
         sessions = []
         for f in self._sessions_dir.iterdir():
             if f.suffix != ".json":
@@ -154,6 +192,7 @@ class OffloadSessionManager:
                 data = json.loads(f.read_text())
                 session = OffloadSession.from_dict(data)
                 sessions.append(session.to_summary())
+                self._update_index(session)
             except (json.JSONDecodeError, KeyError):
                 continue
         sessions.sort(key=lambda s: s.get("last_message_at", ""), reverse=True)
@@ -192,6 +231,11 @@ class OffloadSessionManager:
         with self._lock:
             thread = self._active.get(session_id)
             return thread is not None and thread.is_alive()
+
+    def list_active(self) -> List[Dict[str, Any]]:
+        """Return metadata for all currently running sessions."""
+        with self._lock:
+            return list(self._active_meta.values())
 
     def cancel_session(self, session_id: str) -> bool:
         """Cancel a running session. Returns True if an active session was stopped."""
@@ -301,6 +345,13 @@ class OffloadSessionManager:
                 return
             with self._lock:
                 self._adapters[sid] = adapter
+                self._active_meta[sid] = {
+                    "session_id": sid,
+                    "title": session.title,
+                    "project": session.project,
+                    "started_at": utc_now(),
+                    "instruction": prompt[:200],
+                }
 
             # Start adapter in project directory (or home)
             cwd = Path(session.project) if session.project else Path.home()
@@ -326,10 +377,12 @@ class OffloadSessionManager:
                             "text": text,
                         })
                 elif evt.event_type == "tool_use":
+                    tool = evt.data.get("tool", "")
+                    preview = evt.data.get("input_preview", "")
                     self._publish(sid, "chat.stream", {
-                        "claude_event_type": "agent_output",
-                        "agent_event_type": "tool_use",
-                        "data": evt.data,
+                        "claude_event_type": "agent_tool_use",
+                        "tool": tool,
+                        "input_preview": preview,
                     })
                 elif evt.event_type == "done":
                     result = evt.data.get("result", "")
@@ -339,6 +392,32 @@ class OffloadSessionManager:
                             "claude_event_type": "assistant",
                             "text": result,
                         })
+
+            # Timeout watchdog — warn at 80%, kill at 100%
+            timeout_seconds = 600
+            warn_at = timeout_seconds * 0.8
+
+            def _timeout_watchdog() -> None:
+                import time
+                start = time.monotonic()
+                while not getattr(adapter, '_proc', None) is None or (time.monotonic() - start) < 2:
+                    elapsed = time.monotonic() - start
+                    if elapsed >= warn_at and elapsed < timeout_seconds:
+                        self._publish(sid, "chat.status", {
+                            "message": f"Agent has been running for {int(elapsed/60)}min. You can cancel if needed.",
+                        })
+                        # Only warn once — sleep until timeout
+                        remaining = timeout_seconds - elapsed
+                        time.sleep(remaining)
+                        # Force stop if still running
+                        if adapter.is_running:
+                            self._publish(sid, "chat.status", {"message": "Agent timed out."})
+                            adapter.stop()
+                        return
+                    time.sleep(5)
+
+            watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
+            watchdog.start()
 
             # Run — blocks until CC finishes
             result_text = adapter.send(prompt, on_event=_on_event)
@@ -383,6 +462,7 @@ class OffloadSessionManager:
             with self._lock:
                 self._active.pop(sid, None)
                 self._adapters.pop(sid, None)
+                self._active_meta.pop(sid, None)
                 self._cancelled.discard(sid)
             if was_cancelled:
                 self._publish(sid, "chat.cancelled", {})
