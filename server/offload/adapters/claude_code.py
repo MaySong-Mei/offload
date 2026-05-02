@@ -108,22 +108,14 @@ class ClaudeCodeAdapter:
                         # Emit tool_use event with parsed input
                         if _current_tool_name and on_event:
                             input_str = "".join(_current_tool_input)
-                            input_preview = ""
+                            parsed_input = {}
                             try:
-                                parsed = json.loads(input_str)
-                                # Extract the most useful field for display
-                                input_preview = (
-                                    parsed.get("file_path")
-                                    or parsed.get("command")
-                                    or parsed.get("pattern")
-                                    or parsed.get("query")
-                                    or str(parsed)[:100]
-                                )
+                                parsed_input = json.loads(input_str)
                             except json.JSONDecodeError:
-                                input_preview = input_str[:100]
+                                pass
                             on_event(AgentEvent("tool_use", {
                                 "tool": _current_tool_name,
-                                "input_preview": str(input_preview)[:150],
+                                "input": parsed_input,
                             }))
                             _current_tool_name = None
                             _current_tool_input = []

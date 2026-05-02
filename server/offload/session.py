@@ -19,6 +19,47 @@ from .adapters import AgentEvent, ClaudeCodeAdapter, PTYAdapter
 from .event_bus import EventBus
 from .models import EventRecord, utc_now
 
+def _format_tool_call(tool: str, inp: dict) -> str:
+    """Format a tool call for display, matching CC terminal style."""
+    if tool == "Bash":
+        cmd = inp.get("command", "")
+        desc = inp.get("description", "")
+        header = f"$ {cmd}"
+        if desc:
+            header = f"$ {cmd}  # {desc}"
+        return header
+    elif tool == "Read":
+        path = inp.get("file_path", "")
+        parts = [f"Read {path}"]
+        if inp.get("offset"):
+            parts.append(f":{inp['offset']}")
+        if inp.get("limit"):
+            parts.append(f" ({inp['limit']} lines)")
+        return "".join(parts)
+    elif tool == "Edit":
+        path = inp.get("file_path", "")
+        old = inp.get("old_string", "")
+        preview = old.split("\n")[0][:60] if old else ""
+        return f"Edit {path}" + (f"  {preview}..." if preview else "")
+    elif tool == "Write":
+        path = inp.get("file_path", "")
+        return f"Write {path}"
+    elif tool == "Grep":
+        pattern = inp.get("pattern", "")
+        path = inp.get("path", ".")
+        return f"Grep '{pattern}' {path}"
+    elif tool == "Glob":
+        pattern = inp.get("pattern", "")
+        return f"Glob {pattern}"
+    elif tool == "Agent":
+        desc = inp.get("description", inp.get("prompt", ""))[:80]
+        return f"Agent: {desc}"
+    else:
+        # Generic fallback
+        params = " ".join(f"{v}" for v in list(inp.values())[:2] if isinstance(v, str))[:80]
+        return f"{tool} {params}".strip()
+
+
 class OffloadSession:
     """A single offload session backed by a Claude Code process."""
 
@@ -382,15 +423,15 @@ class OffloadSessionManager:
                         })
                 elif evt.event_type == "tool_use":
                     tool = evt.data.get("tool", "")
-                    preview = evt.data.get("input_preview", "")
-                    prefix = "$" if tool == "Bash" else ">"
-                    label = preview if preview else tool.lower()
-                    tool_line = f"{prefix} {tool.lower()} {label}"
+                    inp = evt.data.get("input", {})
+                    # Format like CC terminal: tool name + key params
+                    tool_line = _format_tool_call(tool, inp)
                     session.messages.append({"role": "tool", "content": tool_line})
                     self._publish(sid, "chat.stream", {
                         "claude_event_type": "agent_tool_use",
                         "tool": tool,
-                        "input_preview": preview,
+                        "input": inp,
+                        "formatted": tool_line,
                     })
                 elif evt.event_type == "tool_result":
                     content = evt.data.get("content", "")

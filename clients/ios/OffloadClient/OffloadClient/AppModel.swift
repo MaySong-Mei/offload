@@ -778,12 +778,11 @@ final class AppModel: ObservableObject {
                                 // Coding agent started — just set flag, no chat bubble
                                 self.isAgentWorking = true
                             } else if evtType == "agent_tool_use" {
-                                // CC is using a tool — render like terminal
-                                let tool = event.payload?["tool"]?.value ?? ""
-                                let preview = event.payload?["input_preview"]?.value ?? ""
-                                let prefix = tool == "Bash" ? "$" : ">"
-                                let label = preview.isEmpty ? tool.lowercased() : "\(tool.lowercased()) \(preview)"
-                                self.chatMessages.append(ChatMessage(role: "tool", content: "\(prefix) \(label)"))
+                                // CC tool call — use server-formatted string
+                                let formatted = event.payload?["formatted"]?.value ?? ""
+                                if !formatted.isEmpty {
+                                    self.chatMessages.append(ChatMessage(role: "tool", content: formatted))
+                                }
                             } else if evtType == "agent_tool_result" {
                                 // Tool output — append as collapsible result
                                 let content = event.payload?["content"]?.value ?? ""
