@@ -153,6 +153,10 @@ class OffloadSessionManager:
 
     def _update_index(self, session: OffloadSession) -> None:
         """Update the session index with this session's metadata."""
+        with self._lock:
+            self._update_index_locked(session)
+
+    def _update_index_locked(self, session: OffloadSession) -> None:
         index = self._load_index()
         entry = {
             "session_id": session.session_id,
@@ -400,21 +404,21 @@ class OffloadSessionManager:
             def _timeout_watchdog() -> None:
                 import time
                 start = time.monotonic()
-                while not getattr(adapter, '_proc', None) is None or (time.monotonic() - start) < 2:
+                warned = False
+                while True:
+                    time.sleep(5)
+                    if not adapter.is_running:
+                        return  # adapter finished normally
                     elapsed = time.monotonic() - start
-                    if elapsed >= warn_at and elapsed < timeout_seconds:
+                    if not warned and elapsed >= warn_at:
                         self._publish(sid, "chat.status", {
                             "message": f"Agent has been running for {int(elapsed/60)}min. You can cancel if needed.",
                         })
-                        # Only warn once — sleep until timeout
-                        remaining = timeout_seconds - elapsed
-                        time.sleep(remaining)
-                        # Force stop if still running
-                        if adapter.is_running:
-                            self._publish(sid, "chat.status", {"message": "Agent timed out."})
-                            adapter.stop()
+                        warned = True
+                    if elapsed >= timeout_seconds:
+                        self._publish(sid, "chat.status", {"message": "Agent timed out."})
+                        adapter.stop()
                         return
-                    time.sleep(5)
 
             watchdog = threading.Thread(target=_timeout_watchdog, daemon=True)
             watchdog.start()
