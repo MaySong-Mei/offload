@@ -36,6 +36,7 @@ final class AppModel: ObservableObject {
     @Published var chatMessages: [ChatMessage] = []
     @Published var isChatStreaming = false
     @Published var isAgentWorking = false
+    @Published var lastSentMessage = ""  // for cancel → restore to input
 
     /// Best-effort project path: current session's project → selected key → first initialized
     var defaultProjectPath: String? {
@@ -311,6 +312,17 @@ final class AppModel: ObservableObject {
         guard let sessionID = selectedChatSessionID else { return }
         guard let client = makeClient() else { return }
         _ = try? await client.cancelChatSession(sessionID: sessionID)
+
+        // Remove the user's last message and any partial assistant/tool messages
+        // that came after it, and restore the user message to input
+        while let last = chatMessages.last {
+            if last.role == "user" {
+                lastSentMessage = last.content
+                chatMessages.removeLast()
+                break
+            }
+            chatMessages.removeLast()
+        }
     }
 
     func sendChatMessage(_ message: String) async {
@@ -331,6 +343,7 @@ final class AppModel: ObservableObject {
 
         guard let sessionID = selectedChatSessionID else { return }
 
+        lastSentMessage = message
         chatMessages.append(ChatMessage(role: "user", content: message))
         isChatStreaming = true
 

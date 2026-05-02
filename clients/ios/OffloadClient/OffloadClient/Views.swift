@@ -3956,7 +3956,13 @@ struct ChatView: View {
                 .onSubmit { sendMessage() }
 
             if model.isChatStreaming || model.isAgentWorking {
-                Button { Task { await model.cancelChat() } } label: {
+                Button {
+                    Task {
+                        await model.cancelChat()
+                        inputText = model.lastSentMessage
+                        model.lastSentMessage = ""
+                    }
+                } label: {
                     Image(systemName: "stop.circle.fill")
                         .font(.title2)
                         .foregroundStyle(.red)
