@@ -226,7 +226,7 @@ class OffloadSessionManager:
         return [
             {"role": m["role"], "content": m["content"]}
             for m in session.messages
-            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+            if m.get("role") in ("user", "assistant", "tool") and isinstance(m.get("content"), str)
         ]
 
     # ---- Messaging -----------------------------------------------------------
@@ -383,6 +383,10 @@ class OffloadSessionManager:
                 elif evt.event_type == "tool_use":
                     tool = evt.data.get("tool", "")
                     preview = evt.data.get("input_preview", "")
+                    prefix = "$" if tool == "Bash" else ">"
+                    label = preview if preview else tool.lower()
+                    tool_line = f"{prefix} {tool.lower()} {label}"
+                    session.messages.append({"role": "tool", "content": tool_line})
                     self._publish(sid, "chat.stream", {
                         "claude_event_type": "agent_tool_use",
                         "tool": tool,
@@ -391,6 +395,11 @@ class OffloadSessionManager:
                 elif evt.event_type == "tool_result":
                     content = evt.data.get("content", "")
                     if content:
+                        # Append result to last tool message
+                        for msg in reversed(session.messages):
+                            if msg.get("role") == "tool":
+                                msg["content"] += "\n" + content[:500]
+                                break
                         self._publish(sid, "chat.stream", {
                             "claude_event_type": "agent_tool_result",
                             "content": content,
