@@ -765,17 +765,21 @@ final class AppModel: ObservableObject {
                                 // Coding agent started — just set flag, no chat bubble
                                 self.isAgentWorking = true
                             } else if evtType == "agent_tool_use" {
-                                // CC is using a tool — show compact activity line
+                                // CC is using a tool — append each as its own line
                                 let tool = event.payload?["tool"]?.value ?? ""
                                 let preview = event.payload?["input_preview"]?.value ?? ""
                                 let icon = Self.toolIcon(tool)
-                                let label = preview.isEmpty ? tool : "\(tool): \(preview)"
-                                // Update or append tool activity message
-                                if let lastIdx = self.chatMessages.indices.last,
-                                   self.chatMessages[lastIdx].role == "tool" {
-                                    self.chatMessages[lastIdx].content = "\(icon) \(label)"
-                                } else {
-                                    self.chatMessages.append(ChatMessage(role: "tool", content: "\(icon) \(label)"))
+                                let label = preview.isEmpty ? tool : "\(preview)"
+                                self.chatMessages.append(ChatMessage(role: "tool", content: "\(icon) \(tool)  \(label)"))
+                            } else if evtType == "agent_tool_result" {
+                                // Tool output — append as collapsible result
+                                let content = event.payload?["content"]?.value ?? ""
+                                if !content.isEmpty {
+                                    // Attach result to the last tool message
+                                    if let lastIdx = self.chatMessages.indices.last,
+                                       self.chatMessages[lastIdx].role == "tool" {
+                                        self.chatMessages[lastIdx].content += "\n\(content)"
+                                    }
                                 }
                             } else if evtType == "agent_output" {
                                 // Legacy agent output events

@@ -133,6 +133,23 @@ class ClaudeCodeAdapter:
                     if sid:
                         self._session_id = sid
 
+                elif etype == "user":
+                    # Tool result — CC received output from a tool
+                    msg = data.get("message", {})
+                    content = msg.get("content", [])
+                    if isinstance(content, list):
+                        for block in content:
+                            if block.get("type") == "tool_result":
+                                result_content = block.get("content", "")
+                                if isinstance(result_content, str) and result_content and on_event:
+                                    # Truncate large tool results
+                                    preview = result_content[:500]
+                                    if len(result_content) > 500:
+                                        preview += f"\n... ({len(result_content)} chars total)"
+                                    on_event(AgentEvent("tool_result", {
+                                        "content": preview,
+                                    }))
+
                 elif etype == "result":
                     result_text = data.get("result", "")
                     sid = data.get("session_id")

@@ -4071,15 +4071,9 @@ private struct ChatBubble: View {
             ChatCardView(card: card, model: model)
                 .padding(.horizontal, 12)
         } else if message.role == "tool" {
-            HStack(spacing: 6) {
-                Text(message.content)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.orange)
-                    .lineLimit(1)
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 1)
+            ToolCallBubble(content: message.content)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 1)
         } else if message.role == "system" {
             HStack {
                 Spacer()
@@ -4110,6 +4104,60 @@ private struct ChatBubble: View {
                 if message.role == "assistant" { Spacer(minLength: 60) }
             }
             .padding(.horizontal, 12)
+        }
+    }
+}
+
+// MARK: - Tool Call Bubble
+
+private struct ToolCallBubble: View {
+    let content: String
+    @State private var isExpanded = false
+
+    private var header: String {
+        content.components(separatedBy: "\n").first ?? content
+    }
+
+    private var resultText: String? {
+        let lines = content.components(separatedBy: "\n")
+        guard lines.count > 1 else { return nil }
+        return lines.dropFirst().joined(separator: "\n")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Tool header — always visible
+            HStack(spacing: 6) {
+                Text(header)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                Spacer()
+                if resultText != nil {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.orange.opacity(0.6))
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if resultText != nil {
+                    withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+                }
+            }
+
+            // Expandable result
+            if isExpanded, let result = resultText {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(result)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .padding(8)
+                }
+                .frame(maxHeight: 150)
+                .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 6))
+                .padding(.top, 4)
+            }
         }
     }
 }

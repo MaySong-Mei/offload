@@ -388,6 +388,13 @@ class OffloadSessionManager:
                         "tool": tool,
                         "input_preview": preview,
                     })
+                elif evt.event_type == "tool_result":
+                    content = evt.data.get("content", "")
+                    if content:
+                        self._publish(sid, "chat.stream", {
+                            "claude_event_type": "agent_tool_result",
+                            "content": content,
+                        })
                 elif evt.event_type == "done":
                     result = evt.data.get("result", "")
                     if result and not collected_text:
