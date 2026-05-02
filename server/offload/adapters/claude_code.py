@@ -22,6 +22,7 @@ class ClaudeCodeAdapter:
         self._session_id: Optional[str] = None
         self._proc: Optional[subprocess.Popen] = None
         self._skip_permissions = skip_permissions
+        self._resume_failed = False  # set if --resume produced a new session
 
     # -- AgentAdapter interface ------------------------------------------------
 
@@ -49,6 +50,11 @@ class ClaudeCodeAdapter:
         if self._skip_permissions:
             cmd.append("--dangerously-skip-permissions")
 
+        # Include .offload/ CLAUDE.md for harness context
+        offload_dir = self._cwd / ".offload"
+        if offload_dir.is_dir():
+            cmd.extend(["--add-dir", str(offload_dir)])
+
         self._proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -59,6 +65,8 @@ class ClaudeCodeAdapter:
         )
 
         result_text = ""
+        expected_session_id = self._session_id  # the id we're trying to resume
+        self._resume_failed = False
         try:
             while True:
                 line = self._proc.stdout.readline()  # type: ignore[union-attr]
@@ -94,6 +102,9 @@ class ClaudeCodeAdapter:
                     result_text = data.get("result", "")
                     sid = data.get("session_id")
                     if sid:
+                        # Detect resume failure: we asked for old_id but got a new one
+                        if expected_session_id and sid != expected_session_id:
+                            self._resume_failed = True
                         self._session_id = sid
                     if on_event:
                         on_event(AgentEvent("done", {
@@ -128,3 +139,7 @@ class ClaudeCodeAdapter:
     @property
     def session_id(self) -> Optional[str]:
         return self._session_id
+
+    @property
+    def resume_failed(self) -> bool:
+        return self._resume_failed

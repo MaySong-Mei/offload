@@ -307,6 +307,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func cancelChat() async {
+        guard let sessionID = selectedChatSessionID else { return }
+        guard let client = makeClient() else { return }
+        _ = try? await client.cancelChatSession(sessionID: sessionID)
+    }
+
     func sendChatMessage(_ message: String) async {
         guard let client = makeClient() else { return }
 
@@ -771,6 +777,14 @@ final class AppModel: ObservableObject {
                                 self.isChatStreaming = false
                                 self.isAgentWorking = false
                             }
+                        } else if event.eventType == "chat.cancelled" && isMySession {
+                            self.isChatStreaming = false
+                            self.isAgentWorking = false
+                            if let lastIdx = self.chatMessages.indices.last,
+                               self.chatMessages[lastIdx].isStreaming {
+                                self.chatMessages[lastIdx].isStreaming = false
+                            }
+                            self.chatMessages.append(ChatMessage(role: "system", content: "Cancelled"))
                         } else if event.eventType == "chat.done" {
                             if isMySession {
                                 self.isChatStreaming = false

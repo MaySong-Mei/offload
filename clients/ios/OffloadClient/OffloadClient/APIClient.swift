@@ -274,6 +274,15 @@ struct APIClient {
         )
     }
 
+    func cancelChatSession(sessionID: String) async throws {
+        _ = try await send(
+            "/chat/sessions/\(sessionID)/cancel",
+            method: "POST",
+            body: EmptyBody(),
+            response: ChatStatusResponse.self
+        )
+    }
+
     func eventRequest() throws -> URLRequest {
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
         components?.scheme = websocketScheme(for: baseURL.scheme ?? "http")

@@ -252,6 +252,17 @@ def make_handler():
                     session = self.server.service.create_chat_session(project=project, adapter_type=adapter_type)
                     self._write_json(HTTPStatus.CREATED, session)
                     return
+                # Match /chat/sessions/<id>/cancel
+                if parsed.path.startswith("/chat/sessions/") and parsed.path.endswith("/cancel"):
+                    parts = parsed.path.split("/")
+                    if len(parts) == 5:
+                        session_id = parts[3]
+                        cancelled = self.server.service.cancel_chat_session(session_id)
+                        if cancelled:
+                            self._write_json(HTTPStatus.OK, {"status": "cancelled"})
+                        else:
+                            self._write_json(HTTPStatus.NOT_FOUND, {"error": "No active session"})
+                        return
                 # Match /chat/sessions/<id>/messages
                 if parsed.path.startswith("/chat/sessions/") and parsed.path.endswith("/messages"):
                     parts = parsed.path.split("/")

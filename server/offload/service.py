@@ -139,6 +139,10 @@ class HarnessService:
             topics_summary=topics_summary,
         )
 
+    def cancel_chat_session(self, session_id: str) -> bool:
+        """Cancel a running chat session. Returns False if not running."""
+        return self.chat_manager.cancel_session(session_id)
+
     def _build_topics_summary(self, project_path: Optional[str]) -> Optional[str]:
         """Build a summary of active topics for the chat system prompt."""
         if not project_path:

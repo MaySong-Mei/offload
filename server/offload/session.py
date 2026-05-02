@@ -90,6 +90,8 @@ class OffloadSessionManager:
         self._config_path = workspace_root / "chat" / "config.json"
         self._lock = threading.Lock()
         self._active: Dict[str, threading.Thread] = {}
+        self._adapters: Dict[str, Any] = {}  # session_id → active adapter (for cancel)
+        self._cancelled: set = set()  # session_ids that were cancelled
 
     # ---- API Key (kept for backward compat with iOS settings) ----------------
 
@@ -191,6 +193,19 @@ class OffloadSessionManager:
             thread = self._active.get(session_id)
             return thread is not None and thread.is_alive()
 
+    def cancel_session(self, session_id: str) -> bool:
+        """Cancel a running session. Returns True if an active session was stopped."""
+        with self._lock:
+            adapter = self._adapters.get(session_id)
+            thread = self._active.get(session_id)
+        if adapter is None and thread is None:
+            return False
+        # Mark as cancelled so _run_session_turn emits the right events
+        self._cancelled.add(session_id)
+        if adapter:
+            adapter.stop()
+        return True
+
     def send_message(
         self,
         session_id: str,
@@ -213,7 +228,7 @@ class OffloadSessionManager:
         self._save_session(session)
 
         # Build a prompt that includes context
-        prompt = self._build_prompt(message, project_context, topics_summary)
+        prompt = self._build_prompt(session, message, project_context, topics_summary)
 
         thread = threading.Thread(
             target=self._run_session_turn,
@@ -227,14 +242,16 @@ class OffloadSessionManager:
 
     def _build_prompt(
         self,
+        session: OffloadSession,
         user_message: str,
         project_context: Optional[Dict[str, str]] = None,
         topics_summary: Optional[str] = None,
     ) -> str:
         """Build prompt for the CC adapter.
 
-        For the first message we include system context.  For follow-ups
-        (via --resume) the context is already in the CC session.
+        For the first message or when resume might fail, include conversation
+        history so CC has context.  For follow-ups (via --resume) the history
+        is already in the CC session, but including a summary is cheap insurance.
         """
         parts: List[str] = []
 
@@ -250,6 +267,20 @@ class OffloadSessionManager:
         if topics_summary:
             parts.append(f"## Active Topics\n{topics_summary}")
 
+        # Include recent conversation history as context insurance
+        # (if --resume fails, CC still has prior context)
+        prior = session.messages[:-1]  # exclude the just-appended user message
+        if prior:
+            history_lines = []
+            for msg in prior[-10:]:  # last 10 messages
+                role = msg.get("role", "?")
+                content = msg.get("content", "")
+                if isinstance(content, str) and content:
+                    preview = content[:300]
+                    history_lines.append(f"**{role}**: {preview}")
+            if history_lines:
+                parts.append("## Prior conversation\n" + "\n\n".join(history_lines))
+
         parts.append(user_message)
         return "\n\n---\n\n".join(parts)
 
@@ -261,13 +292,15 @@ class OffloadSessionManager:
         try:
             self._publish(sid, "chat.status", {"message": "Connecting…"})
 
-            # Create adapter
+            # Create adapter and register for cancel support
             adapter = self._create_adapter(session)
             if adapter is None:
                 self._publish(sid, "chat.error", {
                     "error": f"Unknown adapter type: {session.adapter_type}",
                 })
                 return
+            with self._lock:
+                self._adapters[sid] = adapter
 
             # Start adapter in project directory (or home)
             cwd = Path(session.project) if session.project else Path.home()
@@ -310,6 +343,14 @@ class OffloadSessionManager:
             # Run — blocks until CC finishes
             result_text = adapter.send(prompt, on_event=_on_event)
 
+            # Check if resume failed — if so, warn user
+            if hasattr(adapter, "resume_failed") and adapter.resume_failed:
+                self._publish(sid, "chat.status", {
+                    "message": "Session context was reconstructed (previous session expired)",
+                })
+                # The prompt already contained the user message, and CC started
+                # a fresh session. Next turn will use the new session_id.
+
             # If no text was streamed but we got a result, use it
             assistant_content = "".join(collected_text) or result_text or "(no output)"
 
@@ -338,8 +379,13 @@ class OffloadSessionManager:
             traceback.print_exc(file=sys.stderr)
             self._publish(sid, "chat.error", {"error": str(e)})
         finally:
+            was_cancelled = sid in self._cancelled
             with self._lock:
                 self._active.pop(sid, None)
+                self._adapters.pop(sid, None)
+                self._cancelled.discard(sid)
+            if was_cancelled:
+                self._publish(sid, "chat.cancelled", {})
             self._publish(sid, "chat.done", {})
 
     def _create_adapter(self, session: OffloadSession):
