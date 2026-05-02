@@ -3881,7 +3881,7 @@ struct ChatView: View {
             // Messages
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    LazyVStack(alignment: .leading, spacing: 2) {
                         if model.chatMessages.isEmpty {
                             VStack(spacing: 12) {
                                 Image(systemName: "bubble.left.and.text.bubble.right")
@@ -3901,30 +3901,17 @@ struct ChatView: View {
                         ForEach(model.chatMessages) { message in
                             ChatBubble(message: message, model: model)
                                 .id(message.id)
+                                .transition(.opacity)
                         }
-                        if model.isAgentWorking {
+                        if model.isAgentWorking || model.isChatStreaming {
                             HStack(spacing: 6) {
                                 ProgressView()
                                     .controlSize(.small)
-                                    .tint(Color(.systemGray))
-                                Text("running...")
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(Color(.systemGray))
+                                    .tint(Color(.systemGray3))
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .id("agent-working")
-                        } else if model.isChatStreaming, let last = model.chatMessages.last,
-                           !(last.role == "assistant" && last.isStreaming) {
-                            HStack(spacing: 6) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text("Thinking…")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal)
-                            .id("typing")
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .id("working")
                         }
                     }
                     .padding(.vertical, 12)
@@ -4069,47 +4056,50 @@ private struct ChatBubble: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        if let card = message.card {
-            ChatCardView(card: card, model: model)
-                .padding(.horizontal, 12)
-        } else if message.role == "tool" {
-            ToolCallBubble(content: message.content)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 1)
-        } else if message.role == "system" {
+        switch message.role {
+        case "tool":
+            ToolCallLine(content: message.content)
+                .padding(.horizontal, 16)
+
+        case "system":
+            Text(message.content)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+
+        case "user":
             HStack {
-                Spacer()
-                Text(message.content)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 2)
-        } else if message.role == "user" {
-            HStack {
-                Spacer(minLength: 60)
+                Spacer(minLength: 48)
                 Text(message.content)
                     .font(.body)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
                     .textSelection(.enabled)
             }
-            .padding(.horizontal, 12)
-        } else {
-            // Assistant — no bubble, just text
-            MarkdownContentView(text: message.content)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 4)
-                .textSelection(.enabled)
+            .padding(.horizontal, 14)
+            .padding(.top, 16)
+            .padding(.bottom, 4)
+
+        default:
+            // Assistant — plain text, generous spacing
+            if let card = message.card {
+                ChatCardView(card: card, model: model)
+                    .padding(.horizontal, 14)
+            } else {
+                MarkdownContentView(text: message.content)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 2)
+                    .textSelection(.enabled)
+            }
         }
     }
 }
 
-// MARK: - Tool Call Bubble
+// MARK: - Tool Call Line
 
-private struct ToolCallBubble: View {
+private struct ToolCallLine: View {
     let content: String
     @State private var isExpanded = false
 
@@ -4117,53 +4107,46 @@ private struct ToolCallBubble: View {
         content.components(separatedBy: "\n").first ?? content
     }
 
-    private var resultText: String? {
+    private var hasResult: Bool {
+        content.contains("\n")
+    }
+
+    private var resultText: String {
         let lines = content.components(separatedBy: "\n")
-        guard lines.count > 1 else { return nil }
         return lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 0) {
+            // Header line
+            HStack(spacing: 4) {
                 Text(header)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(Color(.systemGray))
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(Color(.tertiaryLabel))
                     .lineLimit(1)
                 Spacer()
-                if resultText != nil {
+                if hasResult {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(Color(.systemGray3))
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(Color(.quaternaryLabel))
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(Color(.black).opacity(0.04))
             .contentShape(Rectangle())
             .onTapGesture {
-                if resultText != nil {
-                    withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+                if hasResult {
+                    withAnimation(.easeInOut(duration: 0.12)) { isExpanded.toggle() }
                 }
             }
 
-            if isExpanded, let result = resultText {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(result)
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(Color(.systemGray))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                }
-                .frame(maxHeight: 120)
-                .background(Color(.black).opacity(0.03))
+            // Expandable result
+            if isExpanded && hasResult {
+                Text(resultText)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(Color(.tertiaryLabel))
+                    .lineLimit(8)
+                    .padding(.top, 2)
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color(.systemGray5), lineWidth: 0.5)
-        )
     }
 }
 
