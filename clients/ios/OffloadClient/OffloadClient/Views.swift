@@ -4143,7 +4143,7 @@ private struct InlineTerminalWebView: UIViewRepresentable {
         )
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.isOpaque = false
-        webView.backgroundColor = UIColor(red: 0.102, green: 0.102, blue: 0.102, alpha: 1)
+        webView.backgroundColor = UIColor(red: 0.96, green: 0.96, blue: 0.96, alpha: 1)
         webView.scrollView.isScrollEnabled = true
         webView.scrollView.bounces = false
 

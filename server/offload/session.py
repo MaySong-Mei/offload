@@ -434,7 +434,7 @@ class OffloadSessionManager:
 
             self._publish(sid, "chat.stream", {
                 "claude_event_type": "result",
-                "result": assistant_content[:1000],
+                "result": "",
             })
 
         except Exception as e:
