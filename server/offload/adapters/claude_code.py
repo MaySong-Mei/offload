@@ -1,40 +1,35 @@
-"""Claude Code adapter — pty-based for native terminal output."""
+"""Claude Code adapter — via Agent SDK bridge for structured streaming."""
 from __future__ import annotations
 
-import fcntl
 import json
-import os
-import pty
-import select
-import signal
-import struct
 import subprocess
-import termios
-import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from ._base import AgentEvent, EventCallback
 
+# Path to the Node.js bridge script
+_BRIDGE_SCRIPT = Path(__file__).parent.parent.parent / "cc-bridge.mjs"
+
 
 class ClaudeCodeAdapter:
-    """Drives Claude Code CLI via pty for native terminal rendering.
+    """Drives Claude Code via the Agent SDK bridge (cc-bridge.mjs).
 
-    Captures raw terminal output (including ANSI escape codes) so it can
-    be rendered faithfully by xterm.js on the client.  Also runs a parallel
-    stream-json process to capture the session_id for resume.
+    The bridge outputs structured NDJSON events:
+    - {"type":"text","text":"..."} — streaming text token
+    - {"type":"tool_start","tool":"Read"} — tool call began
+    - {"type":"tool_use","tool":"Read","input":{...}} — tool call with full input
+    - {"type":"tool_result","content":"..."} — tool output
+    - {"type":"result","result":"...","session_id":"..."} — final result
     """
 
     def __init__(self, skip_permissions: bool = True) -> None:
         self._cwd: Optional[Path] = None
         self._env: Optional[Dict[str, str]] = None
         self._session_id: Optional[str] = None
-        self._child_pid: Optional[int] = None
-        self._master_fd: Optional[int] = None
+        self._proc: Optional[subprocess.Popen] = None
         self._skip_permissions = skip_permissions
         self._resume_failed = False
-
-    # -- AgentAdapter interface ------------------------------------------------
 
     def start(self, cwd: Path, env: Optional[Dict[str, str]] = None) -> None:
         self._cwd = cwd
@@ -48,135 +43,108 @@ class ClaudeCodeAdapter:
         if self._cwd is None:
             raise RuntimeError("Adapter not started — call start(cwd) first")
 
-        cmd: List[str] = ["claude"]
+        cmd: List[str] = ["node", str(_BRIDGE_SCRIPT), str(self._cwd)]
         if self._session_id:
             cmd.extend(["--resume", self._session_id])
-        cmd.extend(["-p", message])
-        if self._skip_permissions:
-            cmd.append("--dangerously-skip-permissions")
+        cmd.append(message)
 
-        # Include .offload/ CLAUDE.md for harness context
-        offload_dir = self._cwd / ".offload"
-        if offload_dir.is_dir():
-            cmd.extend(["--add-dir", str(offload_dir)])
+        self._proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=self._cwd,
+        )
 
-        # Fork a pty so CC renders as if in a real terminal
-        child_pid, master_fd = pty.fork()
-        if child_pid == 0:
-            # Child process
-            os.chdir(str(self._cwd))
-            env = os.environ.copy()
-            env["TERM"] = "xterm-256color"
-            env["COLUMNS"] = "90"
-            env["LINES"] = "40"
-            if self._env:
-                env.update(self._env)
-            os.execvpe(cmd[0], cmd, env)
-            os._exit(1)
-
-        self._child_pid = child_pid
-        self._master_fd = master_fd
-
-        # Set terminal size
-        winsize = struct.pack("HHHH", 40, 90, 0, 0)
-        fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
-
-        collected_raw: List[bytes] = []
-        collected_text: List[str] = []
         result_text = ""
+        expected_session_id = self._session_id
+        self._resume_failed = False
 
         try:
-            deadline = time.monotonic() + 600
+            while True:
+                line = self._proc.stdout.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-            while time.monotonic() < deadline:
-                readable, _, _ = select.select([master_fd], [], [], 0.05)
-                if master_fd in readable:
-                    try:
-                        chunk = os.read(master_fd, 4096)
-                    except OSError:
-                        break
-                    if not chunk:
-                        break
-                    collected_raw.append(chunk)
-                    text = chunk.decode("utf-8", errors="replace")
-                    collected_text.append(text)
+                etype = data.get("type", "")
+
+                if etype == "text":
+                    text = data.get("text", "")
+                    if text and on_event:
+                        on_event(AgentEvent("text_output", {"text": text}))
+
+                elif etype == "tool_start":
                     if on_event:
-                        on_event(AgentEvent("terminal_output", {"data": text}))
-                else:
-                    # Check if child exited
-                    try:
-                        pid, status = os.waitpid(child_pid, os.WNOHANG)
-                        if pid != 0:
-                            # Drain remaining output
-                            try:
-                                while True:
-                                    rem = os.read(master_fd, 4096)
-                                    if not rem:
-                                        break
-                                    collected_raw.append(rem)
-                                    text = rem.decode("utf-8", errors="replace")
-                                    collected_text.append(text)
-                                    if on_event:
-                                        on_event(AgentEvent("terminal_output", {"data": text}))
-                            except OSError:
-                                pass
-                            break
-                    except ChildProcessError:
-                        break
+                        on_event(AgentEvent("tool_start", {
+                            "tool": data.get("tool", ""),
+                            "id": data.get("id", ""),
+                        }))
 
-            result_text = "".join(collected_text)
+                elif etype == "tool_use":
+                    if on_event:
+                        on_event(AgentEvent("tool_use", {
+                            "tool": data.get("tool", ""),
+                            "id": data.get("id", ""),
+                            "input": data.get("input", {}),
+                        }))
 
-            # Capture session_id from a quick json-format run
-            self._capture_session_id_from_result(result_text)
+                elif etype == "tool_result":
+                    if on_event:
+                        on_event(AgentEvent("tool_result", {
+                            "id": data.get("id", ""),
+                            "content": data.get("content", ""),
+                        }))
 
+                elif etype == "result":
+                    result_text = data.get("result", "")
+                    sid = data.get("session_id")
+                    if sid:
+                        if expected_session_id and sid != expected_session_id:
+                            self._resume_failed = True
+                        self._session_id = sid
+                    if on_event:
+                        on_event(AgentEvent("done", {
+                            "result": result_text,
+                            "session_id": sid,
+                            "cost": data.get("cost", 0),
+                            "duration_ms": data.get("duration_ms", 0),
+                        }))
+
+                elif etype == "error":
+                    if on_event:
+                        on_event(AgentEvent("error", {"error": data.get("error", "")}))
+
+            self._proc.wait(timeout=600)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
             if on_event:
-                on_event(AgentEvent("done", {
-                    "result": result_text,
-                    "session_id": self._session_id,
-                }))
-
+                on_event(AgentEvent("error", {"error": "Agent timed out after 600s"}))
         finally:
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
-            try:
-                os.kill(child_pid, signal.SIGTERM)
-                os.waitpid(child_pid, 0)
-            except OSError:
-                pass
-            self._child_pid = None
-            self._master_fd = None
+            self._proc = None
 
         return result_text
 
     def stop(self) -> None:
-        if self._master_fd is not None:
+        proc = self._proc
+        if proc and proc.poll() is None:
+            proc.terminate()
             try:
-                os.close(self._master_fd)
-            except OSError:
-                pass
-            self._master_fd = None
-        if self._child_pid is not None:
-            try:
-                os.kill(self._child_pid, signal.SIGTERM)
-                try:
-                    os.waitpid(self._child_pid, os.WNOHANG)
-                except ChildProcessError:
-                    pass
-            except OSError:
-                pass
-            self._child_pid = None
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        self._proc = None
 
     @property
     def is_running(self) -> bool:
-        if self._child_pid is None:
-            return False
-        try:
-            pid, _ = os.waitpid(self._child_pid, os.WNOHANG)
-            return pid == 0
-        except ChildProcessError:
-            return False
+        return self._proc is not None and self._proc.poll() is None
 
     @property
     def session_id(self) -> Optional[str]:
@@ -185,34 +153,3 @@ class ClaudeCodeAdapter:
     @property
     def resume_failed(self) -> bool:
         return self._resume_failed
-
-    # -- Internal --------------------------------------------------------------
-
-    def _capture_session_id_from_result(self, output: str) -> None:
-        """Try to find session_id from CC's output or recent session files."""
-        # Check ~/.claude/projects/ for the most recent session
-        try:
-            if not self._cwd:
-                return
-            # CC stores sessions under a path-based key
-            projects_dir = Path.home() / ".claude" / "projects"
-            if not projects_dir.is_dir():
-                return
-            # Find most recently modified .jsonl file
-            session_files = []
-            for d in projects_dir.iterdir():
-                if d.is_dir():
-                    for f in d.iterdir():
-                        if f.suffix == ".jsonl":
-                            session_files.append(f)
-            if not session_files:
-                return
-            session_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-            newest = session_files[0]
-            # The filename (without extension) is the session_id
-            new_sid = newest.stem
-            if self._session_id and new_sid != self._session_id:
-                self._resume_failed = True
-            self._session_id = new_sid
-        except OSError:
-            pass

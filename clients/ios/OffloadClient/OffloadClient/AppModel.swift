@@ -766,14 +766,27 @@ final class AppModel: ObservableObject {
                             }
                         } else if event.eventType == "chat.stream" && isMySession {
                             let evtType = event.payload?["claude_event_type"]?.value ?? ""
-                            if evtType == "terminal", let data = event.payload?["data"]?.value, !data.isEmpty {
-                                // Raw terminal output — accumulate into terminal message
+                            if evtType == "tool_start" {
+                                // Tool call started — show tool name
+                                let tool = event.payload?["tool"]?.value ?? ""
+                                self.isAgentWorking = true
+                                self.chatMessages.append(ChatMessage(role: "tool", content: tool))
+                            } else if evtType == "tool_use" {
+                                // Tool call with full input — update last tool message
+                                let tool = event.payload?["tool"]?.value ?? ""
+                                let input = event.payload?["input"]?.value ?? ""
                                 if let lastIdx = self.chatMessages.indices.last,
-                                   self.chatMessages[lastIdx].role == "terminal" && self.chatMessages[lastIdx].isStreaming {
-                                    self.chatMessages[lastIdx].content += data
-                                } else {
-                                    self.chatMessages.append(ChatMessage(role: "terminal", content: data, isStreaming: true))
+                                   self.chatMessages[lastIdx].role == "tool" {
+                                    self.chatMessages[lastIdx].content = "\(tool)\n\(input)"
                                 }
+                            } else if evtType == "tool_result" {
+                                // Tool output — append to last tool message
+                                let content = event.payload?["content"]?.value ?? ""
+                                if !content.isEmpty, let lastIdx = self.chatMessages.indices.last,
+                                   self.chatMessages[lastIdx].role == "tool" {
+                                    self.chatMessages[lastIdx].content += "\n---\n\(content)"
+                                }
+                                self.isAgentWorking = false
                             } else if evtType == "assistant", let text = event.payload?["text"]?.value, !text.isEmpty {
                                 if let lastIdx = self.chatMessages.indices.last,
                                    self.chatMessages[lastIdx].role == "assistant" && self.chatMessages[lastIdx].isStreaming {

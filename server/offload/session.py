@@ -226,7 +226,7 @@ class OffloadSessionManager:
         return [
             {"role": m["role"], "content": m["content"]}
             for m in session.messages
-            if m.get("role") in ("user", "assistant", "tool", "terminal") and isinstance(m.get("content"), str)
+            if m.get("role") in ("user", "assistant", "tool") and isinstance(m.get("content"), str)
         ]
 
     # ---- Messaging -----------------------------------------------------------
@@ -367,18 +367,51 @@ class OffloadSessionManager:
                 "claude_event_type": "agent_activity",
             })
 
-            # Collect raw terminal output
-            terminal_chunks: List[str] = []
+            # Collect text for the assistant message
+            collected_text: List[str] = []
 
             def _on_event(evt: AgentEvent) -> None:
-                if evt.event_type == "terminal_output":
-                    data = evt.data.get("data", "")
-                    if data:
-                        terminal_chunks.append(data)
+                if evt.event_type == "text_output":
+                    text = evt.data.get("text", "")
+                    if text:
+                        collected_text.append(text)
                         self._publish(sid, "chat.stream", {
-                            "claude_event_type": "terminal",
-                            "data": data,
+                            "claude_event_type": "assistant",
+                            "text": text,
                         })
+                elif evt.event_type == "tool_start":
+                    self._publish(sid, "chat.stream", {
+                        "claude_event_type": "tool_start",
+                        "tool": evt.data.get("tool", ""),
+                    })
+                elif evt.event_type == "tool_use":
+                    tool = evt.data.get("tool", "")
+                    inp = evt.data.get("input", {})
+                    # Store tool call in session
+                    session.messages.append({"role": "tool", "content": json.dumps({
+                        "tool": tool, "input": inp,
+                    })})
+                    self._publish(sid, "chat.stream", {
+                        "claude_event_type": "tool_use",
+                        "tool": tool,
+                        "input": inp,
+                    })
+                elif evt.event_type == "tool_result":
+                    content = evt.data.get("content", "")
+                    # Append result to last tool message
+                    for msg in reversed(session.messages):
+                        if msg.get("role") == "tool":
+                            try:
+                                d = json.loads(msg["content"])
+                                d["result"] = content[:500]
+                                msg["content"] = json.dumps(d)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                            break
+                    self._publish(sid, "chat.stream", {
+                        "claude_event_type": "tool_result",
+                        "content": content,
+                    })
 
             # Timeout watchdog — warn at 80%, kill at 100%
             timeout_seconds = 600
@@ -417,10 +450,10 @@ class OffloadSessionManager:
                 # The prompt already contained the user message, and CC started
                 # a fresh session. Next turn will use the new session_id.
 
-            # Save terminal output as a single message
-            raw_output = "".join(terminal_chunks)
-            if raw_output:
-                session.messages.append({"role": "terminal", "content": raw_output})
+            # Save assistant text
+            assistant_content = "".join(collected_text) or result_text or ""
+            if assistant_content:
+                session.messages.append({"role": "assistant", "content": assistant_content})
             session.last_message_at = utc_now()
 
             # Persist CC session_id for resume

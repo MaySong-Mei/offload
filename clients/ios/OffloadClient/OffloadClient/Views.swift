@@ -4061,11 +4061,6 @@ private struct ChatBubble: View {
             ToolCallLine(content: message.content)
                 .padding(.horizontal, 16)
 
-        case "terminal":
-            InlineTerminalView(content: message.content)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-
         case "system":
             Text(message.content)
                 .font(.caption)
@@ -4175,28 +4170,32 @@ private struct ToolCallLine: View {
     let content: String
     @State private var isExpanded = false
 
-    // Parse "ToolName rest" or "$ command" from the first line
     private var toolName: String {
-        let first = content.components(separatedBy: "\n").first ?? content
-        if first.hasPrefix("$ ") { return "Bash" }
-        // "Read /path", "Edit /path", "Write /path", "Grep ...", "Glob ..."
-        let parts = first.split(separator: " ", maxSplits: 1)
-        if let name = parts.first { return String(name) }
-        return "Tool"
+        content.components(separatedBy: "\n").first ?? content
     }
 
     private var toolDetail: String {
-        let first = content.components(separatedBy: "\n").first ?? content
-        if first.hasPrefix("$ ") { return String(first.dropFirst(2)) }
-        let parts = first.split(separator: " ", maxSplits: 1)
-        return parts.count > 1 ? String(parts[1]) : ""
+        // Second line is input (JSON or plain text)
+        let lines = content.components(separatedBy: "\n")
+        guard lines.count > 1 else { return "" }
+        let inputLine = lines[1]
+        // Try to extract key fields from JSON input
+        if let data = inputLine.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return (parsed["file_path"] as? String)
+                ?? (parsed["command"] as? String)
+                ?? (parsed["pattern"] as? String)
+                ?? (parsed["prompt"] as? String)
+                ?? inputLine.prefix(80).description
+        }
+        return String(inputLine.prefix(80))
     }
 
-    private var hasResult: Bool { content.contains("\n") }
+    private var hasResult: Bool { content.contains("---\n") }
 
     private var resultText: String {
-        let lines = content.components(separatedBy: "\n")
-        return lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let range = content.range(of: "---\n") else { return "" }
+        return String(content[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var resultLines: [String] {
