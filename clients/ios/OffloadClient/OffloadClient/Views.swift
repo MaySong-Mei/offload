@@ -4174,24 +4174,31 @@ private struct ToolCallLine: View {
         content.components(separatedBy: "\n").first ?? content
     }
 
+    // First line of the detail (file path or command)
     private var toolDetail: String {
         let lines = content.components(separatedBy: "\n")
         guard lines.count > 1 else { return "" }
-        // Second line is the pre-formatted detail from server
-        let detail = lines[1]
-        return String(detail.prefix(120))
+        return String(lines[1].prefix(120))
     }
 
-    private var hasResult: Bool { content.contains("\n---\n") }
+    // Everything between header and --- separator (diff content)
+    private var diffContent: String {
+        let parts = content.components(separatedBy: "\n---\n")
+        let body = parts[0]
+        let lines = body.components(separatedBy: "\n")
+        // Skip tool name (line 0) and detail/path (line 1)
+        guard lines.count > 2 else { return "" }
+        return lines[2...].joined(separator: "\n")
+    }
 
+    // Content after --- separator (tool execution result)
     private var resultText: String {
         guard let range = content.range(of: "\n---\n") else { return "" }
         return String(content[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var resultLines: [String] {
-        let lines = content.components(separatedBy: "\n")
-        return Array(lines.dropFirst())
+    private var hasExpandableContent: Bool {
+        !diffContent.isEmpty || !resultText.isEmpty
     }
 
     private func lineColor(_ line: String) -> Color {
@@ -4231,26 +4238,34 @@ private struct ToolCallLine: View {
                         .foregroundStyle(Color(.secondaryLabel))
                         .lineLimit(1)
                     Spacer()
-                    if hasResult {
+                    if hasExpandableContent {
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                             .font(.system(size: 8, weight: .medium))
                             .foregroundStyle(Color(.tertiaryLabel))
                     }
                 }
 
-                // Expandable output
-                if isExpanded && hasResult {
+                // Expandable: diff content + tool result
+                if isExpanded && hasExpandableContent {
                     VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(resultLines.prefix(16).enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundStyle(lineColor(line))
-                                .lineLimit(1)
+                        // Diff lines (Edit: -/+ lines, Write: + lines)
+                        if !diffContent.isEmpty {
+                            ForEach(Array(diffContent.components(separatedBy: "\n").prefix(30).enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .foregroundStyle(lineColor(line))
+                                    .lineLimit(1)
+                            }
                         }
-                        if resultLines.count > 16 {
-                            Text("... \(resultLines.count - 16) more lines")
+                        // Tool execution result
+                        if !resultText.isEmpty {
+                            if !diffContent.isEmpty {
+                                Divider().padding(.vertical, 2)
+                            }
+                            Text(resultText)
                                 .font(.system(.caption2, design: .monospaced))
-                                .foregroundStyle(Color(.quaternaryLabel))
+                                .foregroundStyle(Color(.tertiaryLabel))
+                                .lineLimit(8)
                         }
                     }
                     .padding(.top, 2)
@@ -4262,7 +4277,7 @@ private struct ToolCallLine: View {
         .padding(.horizontal, 2)
         .contentShape(Rectangle())
         .onTapGesture {
-            if hasResult {
+            if hasExpandableContent {
                 withAnimation(.easeInOut(duration: 0.12)) { isExpanded.toggle() }
             }
         }

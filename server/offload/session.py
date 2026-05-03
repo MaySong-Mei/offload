@@ -31,13 +31,23 @@ def _format_tool_detail(tool: str, inp: dict) -> str:
         return path + extra
     elif tool == "Edit":
         path = inp.get("file_path", "")
-        old_lines = (inp.get("old_string") or "").count("\n") + 1
-        new_lines = (inp.get("new_string") or "").count("\n") + 1
-        return f"{path}  (-{old_lines} +{new_lines} lines)"
+        old = inp.get("old_string", "")
+        new = inp.get("new_string", "")
+        lines = [path]
+        if old:
+            for l in old.split("\n"):
+                lines.append(f"- {l}")
+        if new:
+            for l in new.split("\n"):
+                lines.append(f"+ {l}")
+        return "\n".join(lines)
     elif tool == "Write":
         path = inp.get("file_path", "")
-        lines = (inp.get("content") or "").count("\n") + 1
-        return f"{path}  ({lines} lines)"
+        content = inp.get("content", "")
+        lines = [path]
+        for l in content.split("\n"):
+            lines.append(f"+ {l}")
+        return "\n".join(lines)
     elif tool == "Bash":
         cmd = inp.get("command", "")
         desc = inp.get("description", "")
