@@ -4151,14 +4151,12 @@ private struct InlineTerminalWebView: UIViewRepresentable {
             webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
         }
 
-        // Write content after page loads
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            let escaped = content
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "'", with: "\\'")
-                .replacingOccurrences(of: "\n", with: "\\n")
-                .replacingOccurrences(of: "\r", with: "\\r")
-            webView.evaluateJavaScript("writeContent('\(escaped)');", completionHandler: nil)
+        // Write content after page loads — use base64 to safely pass ANSI codes
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            if let data = content.data(using: .utf8) {
+                let b64 = data.base64EncodedString()
+                webView.evaluateJavaScript("writeBase64('\(b64)');", completionHandler: nil)
+            }
         }
 
         return webView

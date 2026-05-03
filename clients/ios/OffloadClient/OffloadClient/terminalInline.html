@@ -54,18 +54,26 @@
   term.open(document.getElementById('terminal'));
   fitAddon.fit();
 
-  // Write content passed from Swift
-  window.writeContent = function(data) {
-    term.write(data);
-    // After writing, report the actual content height
+  function reportHeight() {
     setTimeout(function() {
       var rows = term.buffer.active.cursorY + 1;
-      var lineHeight = 12 * 1.2; // fontSize * lineHeight
+      var lineHeight = 12 * 1.2;
       var height = Math.max(rows * lineHeight + 16, 40);
       if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.terminalSize) {
         window.webkit.messageHandlers.terminalSize.postMessage({ height: height, rows: rows });
       }
     }, 50);
+  }
+
+  // Write base64-encoded content (safe for ANSI escape codes)
+  window.writeBase64 = function(b64) {
+    try {
+      var raw = atob(b64);
+      term.write(raw);
+    } catch(e) {
+      term.write('[decode error]');
+    }
+    reportHeight();
   };
 
   // Notify ready
