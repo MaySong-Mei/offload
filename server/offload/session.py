@@ -39,11 +39,30 @@ def _format_tool_call(tool: str, inp: dict) -> str:
     elif tool == "Edit":
         path = inp.get("file_path", "")
         old = inp.get("old_string", "")
-        preview = old.split("\n")[0][:60] if old else ""
-        return f"Edit {path}" + (f"  {preview}..." if preview else "")
+        new = inp.get("new_string", "")
+        lines = [f"Edit {path}"]
+        # Show diff: removed lines and added lines
+        if old:
+            for line in old.split("\n")[:6]:
+                lines.append(f"- {line}")
+            if old.count("\n") > 5:
+                lines.append(f"  ... ({old.count(chr(10))+1} lines)")
+        if new:
+            for line in new.split("\n")[:6]:
+                lines.append(f"+ {line}")
+            if new.count("\n") > 5:
+                lines.append(f"  ... ({new.count(chr(10))+1} lines)")
+        return "\n".join(lines)
     elif tool == "Write":
         path = inp.get("file_path", "")
-        return f"Write {path}"
+        content = inp.get("content", "")
+        lines = [f"Write {path}"]
+        if content:
+            for line in content.split("\n")[:8]:
+                lines.append(f"  {line}")
+            if content.count("\n") > 7:
+                lines.append(f"  ... ({content.count(chr(10))+1} lines)")
+        return "\n".join(lines)
     elif tool == "Grep":
         pattern = inp.get("pattern", "")
         path = inp.get("path", ".")

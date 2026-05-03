@@ -4127,6 +4127,17 @@ private struct ToolCallLine: View {
         return lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var resultLines: [String] {
+        let lines = content.components(separatedBy: "\n")
+        return Array(lines.dropFirst())
+    }
+
+    private func lineColor(_ line: String) -> Color {
+        if line.hasPrefix("+ ") { return .green }
+        if line.hasPrefix("- ") { return .red }
+        return Color(.tertiaryLabel)
+    }
+
     private var accentColor: Color {
         switch toolName {
         case "Bash": return .orange
@@ -4167,11 +4178,20 @@ private struct ToolCallLine: View {
 
                 // Expandable output
                 if isExpanded && hasResult {
-                    Text(resultText)
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(Color(.tertiaryLabel))
-                        .lineLimit(12)
-                        .padding(.top, 1)
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(resultLines.prefix(16).enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(lineColor(line))
+                                .lineLimit(1)
+                        }
+                        if resultLines.count > 16 {
+                            Text("... \(resultLines.count - 16) more lines")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(Color(.quaternaryLabel))
+                        }
+                    }
+                    .padding(.top, 2)
                 }
             }
             .padding(.leading, 8)
