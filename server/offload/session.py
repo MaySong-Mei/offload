@@ -19,6 +19,40 @@ from .adapters import AgentEvent, ClaudeCodeAdapter, PTYAdapter
 from .event_bus import EventBus
 from .models import EventRecord, utc_now
 
+def _format_tool_detail(tool: str, inp: dict) -> str:
+    """Format tool input as a human-readable single-line description."""
+    if tool == "Read":
+        path = inp.get("file_path", "")
+        extra = ""
+        if inp.get("offset"):
+            extra += f":{inp['offset']}"
+        if inp.get("limit"):
+            extra += f" ({inp['limit']} lines)"
+        return path + extra
+    elif tool == "Edit":
+        path = inp.get("file_path", "")
+        old_lines = (inp.get("old_string") or "").count("\n") + 1
+        new_lines = (inp.get("new_string") or "").count("\n") + 1
+        return f"{path}  (-{old_lines} +{new_lines} lines)"
+    elif tool == "Write":
+        path = inp.get("file_path", "")
+        lines = (inp.get("content") or "").count("\n") + 1
+        return f"{path}  ({lines} lines)"
+    elif tool == "Bash":
+        cmd = inp.get("command", "")
+        desc = inp.get("description", "")
+        return f"$ {cmd}" + (f"  # {desc}" if desc else "")
+    elif tool == "Grep":
+        return f"'{inp.get('pattern', '')}' in {inp.get('path', '.')}"
+    elif tool == "Glob":
+        return inp.get("pattern", "")
+    elif tool == "Agent":
+        return inp.get("description", inp.get("prompt", ""))[:80]
+    else:
+        vals = [str(v) for v in inp.values() if isinstance(v, str)]
+        return " ".join(vals)[:80]
+
+
 class OffloadSession:
     """A single offload session backed by a Claude Code process."""
 
@@ -387,27 +421,22 @@ class OffloadSessionManager:
                 elif evt.event_type == "tool_use":
                     tool = evt.data.get("tool", "")
                     inp = evt.data.get("input", {})
-                    # Store tool call in session
-                    session.messages.append({"role": "tool", "content": json.dumps({
-                        "tool": tool, "input": inp,
-                    })})
+                    # Format a human-readable description
+                    detail = _format_tool_detail(tool, inp)
+                    session.messages.append({"role": "tool", "content": f"{tool}\n{detail}"})
                     self._publish(sid, "chat.stream", {
                         "claude_event_type": "tool_use",
                         "tool": tool,
-                        "input": inp,
+                        "detail": detail,
                     })
                 elif evt.event_type == "tool_result":
                     content = evt.data.get("content", "")
                     # Append result to last tool message
-                    for msg in reversed(session.messages):
-                        if msg.get("role") == "tool":
-                            try:
-                                d = json.loads(msg["content"])
-                                d["result"] = content[:500]
-                                msg["content"] = json.dumps(d)
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-                            break
+                    if content:
+                        for msg in reversed(session.messages):
+                            if msg.get("role") == "tool":
+                                msg["content"] += "\n---\n" + content[:500]
+                                break
                     self._publish(sid, "chat.stream", {
                         "claude_event_type": "tool_result",
                         "content": content,

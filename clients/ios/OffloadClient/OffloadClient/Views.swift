@@ -4175,26 +4175,17 @@ private struct ToolCallLine: View {
     }
 
     private var toolDetail: String {
-        // Second line is input (JSON or plain text)
         let lines = content.components(separatedBy: "\n")
         guard lines.count > 1 else { return "" }
-        let inputLine = lines[1]
-        // Try to extract key fields from JSON input
-        if let data = inputLine.data(using: .utf8),
-           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            return (parsed["file_path"] as? String)
-                ?? (parsed["command"] as? String)
-                ?? (parsed["pattern"] as? String)
-                ?? (parsed["prompt"] as? String)
-                ?? inputLine.prefix(80).description
-        }
-        return String(inputLine.prefix(80))
+        // Second line is the pre-formatted detail from server
+        let detail = lines[1]
+        return String(detail.prefix(120))
     }
 
-    private var hasResult: Bool { content.contains("---\n") }
+    private var hasResult: Bool { content.contains("\n---\n") }
 
     private var resultText: String {
-        guard let range = content.range(of: "---\n") else { return "" }
+        guard let range = content.range(of: "\n---\n") else { return "" }
         return String(content[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

@@ -772,12 +772,12 @@ final class AppModel: ObservableObject {
                                 self.isAgentWorking = true
                                 self.chatMessages.append(ChatMessage(role: "tool", content: tool))
                             } else if evtType == "tool_use" {
-                                // Tool call with full input — update last tool message
+                                // Tool call — update last tool message with detail
                                 let tool = event.payload?["tool"]?.value ?? ""
-                                let input = event.payload?["input"]?.value ?? ""
+                                let detail = event.payload?["detail"]?.value ?? ""
                                 if let lastIdx = self.chatMessages.indices.last,
                                    self.chatMessages[lastIdx].role == "tool" {
-                                    self.chatMessages[lastIdx].content = "\(tool)\n\(input)"
+                                    self.chatMessages[lastIdx].content = "\(tool)\n\(detail)"
                                 }
                             } else if evtType == "tool_result" {
                                 // Tool output — append to last tool message
