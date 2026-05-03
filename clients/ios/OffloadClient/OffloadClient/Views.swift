@@ -4061,6 +4061,11 @@ private struct ChatBubble: View {
             ToolCallLine(content: message.content)
                 .padding(.horizontal, 16)
 
+        case "terminal":
+            InlineTerminalView(content: message.content)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+
         case "system":
             Text(message.content)
                 .font(.caption)
@@ -4094,6 +4099,75 @@ private struct ChatBubble: View {
                     .textSelection(.enabled)
             }
         }
+    }
+}
+
+// MARK: - Inline Terminal View
+
+private class InlineTerminalCoordinator: NSObject, WKScriptMessageHandler {
+    var onHeight: ((CGFloat) -> Void)?
+
+    func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any] else { return }
+        if let height = body["height"] as? CGFloat {
+            DispatchQueue.main.async { self.onHeight?(height) }
+        }
+    }
+}
+
+private struct InlineTerminalView: View {
+    let content: String
+    @State private var contentHeight: CGFloat = 60
+
+    var body: some View {
+        InlineTerminalWebView(content: content, height: $contentHeight)
+            .frame(height: min(contentHeight, 400))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct InlineTerminalWebView: UIViewRepresentable {
+    let content: String
+    @Binding var height: CGFloat
+
+    func makeCoordinator() -> InlineTerminalCoordinator {
+        let coord = InlineTerminalCoordinator()
+        coord.onHeight = { h in height = h }
+        return coord
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.userContentController.add(
+            WeakScriptMessageHandler(context.coordinator), name: "terminalSize"
+        )
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.isOpaque = false
+        webView.backgroundColor = UIColor(red: 0.102, green: 0.102, blue: 0.102, alpha: 1)
+        webView.scrollView.isScrollEnabled = true
+        webView.scrollView.bounces = false
+
+        if let htmlURL = Bundle.main.url(forResource: "terminalInline", withExtension: "html") {
+            webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
+        }
+
+        // Write content after page loads
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            let escaped = content
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "'", with: "\\'")
+                .replacingOccurrences(of: "\n", with: "\\n")
+                .replacingOccurrences(of: "\r", with: "\\r")
+            webView.evaluateJavaScript("writeContent('\(escaped)');", completionHandler: nil)
+        }
+
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: InlineTerminalCoordinator) {
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "terminalSize")
     }
 }
 

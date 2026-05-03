@@ -1,8 +1,16 @@
-"""Claude Code adapter — first-class streaming via --include-partial-messages."""
+"""Claude Code adapter — pty-based for native terminal output."""
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import pty
+import select
+import signal
+import struct
 import subprocess
+import termios
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -10,19 +18,21 @@ from ._base import AgentEvent, EventCallback
 
 
 class ClaudeCodeAdapter:
-    """Drives Claude Code CLI with true token-level streaming.
+    """Drives Claude Code CLI via pty for native terminal rendering.
 
-    Uses ``--include-partial-messages`` with ``stream-json`` to get
-    ``content_block_delta`` events containing individual text tokens.
+    Captures raw terminal output (including ANSI escape codes) so it can
+    be rendered faithfully by xterm.js on the client.  Also runs a parallel
+    stream-json process to capture the session_id for resume.
     """
 
     def __init__(self, skip_permissions: bool = True) -> None:
         self._cwd: Optional[Path] = None
         self._env: Optional[Dict[str, str]] = None
         self._session_id: Optional[str] = None
-        self._proc: Optional[subprocess.Popen] = None
+        self._child_pid: Optional[int] = None
+        self._master_fd: Optional[int] = None
         self._skip_permissions = skip_permissions
-        self._resume_failed = False  # set if --resume produced a new session
+        self._resume_failed = False
 
     # -- AgentAdapter interface ------------------------------------------------
 
@@ -41,12 +51,7 @@ class ClaudeCodeAdapter:
         cmd: List[str] = ["claude"]
         if self._session_id:
             cmd.extend(["--resume", self._session_id])
-        cmd.extend([
-            "-p", message,
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-        ])
+        cmd.extend(["-p", message])
         if self._skip_permissions:
             cmd.append("--dangerously-skip-permissions")
 
@@ -55,130 +60,123 @@ class ClaudeCodeAdapter:
         if offload_dir.is_dir():
             cmd.extend(["--add-dir", str(offload_dir)])
 
-        self._proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,  # line-buffered
-            cwd=self._cwd,
-        )
+        # Fork a pty so CC renders as if in a real terminal
+        child_pid, master_fd = pty.fork()
+        if child_pid == 0:
+            # Child process
+            os.chdir(str(self._cwd))
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+            env["COLUMNS"] = "90"
+            env["LINES"] = "40"
+            if self._env:
+                env.update(self._env)
+            os.execvpe(cmd[0], cmd, env)
+            os._exit(1)
 
+        self._child_pid = child_pid
+        self._master_fd = master_fd
+
+        # Set terminal size
+        winsize = struct.pack("HHHH", 40, 90, 0, 0)
+        fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+
+        collected_raw: List[bytes] = []
+        collected_text: List[str] = []
         result_text = ""
-        expected_session_id = self._session_id  # the id we're trying to resume
-        self._resume_failed = False
-        # Track current tool_use for input accumulation
-        _current_tool_name: Optional[str] = None
-        _current_tool_input: List[str] = []
+
         try:
-            while True:
-                line = self._proc.stdout.readline()  # type: ignore[union-attr]
-                if not line:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+            deadline = time.monotonic() + 600
 
-                etype = data.get("type", "")
-
-                if etype == "stream_event":
-                    evt = data.get("event", {})
-                    evt_type = evt.get("type", "")
-
-                    if evt_type == "content_block_start":
-                        block = evt.get("content_block", {})
-                        if block.get("type") == "tool_use":
-                            _current_tool_name = block.get("name", "")
-                            _current_tool_input = []
-
-                    elif evt_type == "content_block_delta":
-                        delta = evt.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text = delta.get("text", "")
-                            if text and on_event:
-                                on_event(AgentEvent("text_output", {"text": text}))
-                        elif delta.get("type") == "input_json_delta":
-                            _current_tool_input.append(delta.get("partial_json", ""))
-
-                    elif evt_type == "content_block_stop":
-                        # Emit tool_use event with parsed input
-                        if _current_tool_name and on_event:
-                            input_str = "".join(_current_tool_input)
-                            parsed_input = {}
-                            try:
-                                parsed_input = json.loads(input_str)
-                            except json.JSONDecodeError:
-                                pass
-                            on_event(AgentEvent("tool_use", {
-                                "tool": _current_tool_name,
-                                "input": parsed_input,
-                            }))
-                            _current_tool_name = None
-                            _current_tool_input = []
-
-                    # Capture session_id from any stream_event
-                    sid = data.get("session_id")
-                    if sid:
-                        self._session_id = sid
-
-                elif etype == "user":
-                    # Tool result — CC received output from a tool
-                    msg = data.get("message", {})
-                    content = msg.get("content", [])
-                    if isinstance(content, list):
-                        for block in content:
-                            if block.get("type") == "tool_result":
-                                result_content = block.get("content", "")
-                                if isinstance(result_content, str) and result_content and on_event:
-                                    # Truncate large tool results
-                                    preview = result_content[:500]
-                                    if len(result_content) > 500:
-                                        preview += f"\n... ({len(result_content)} chars total)"
-                                    on_event(AgentEvent("tool_result", {
-                                        "content": preview,
-                                    }))
-
-                elif etype == "result":
-                    result_text = data.get("result", "")
-                    sid = data.get("session_id")
-                    if sid:
-                        # Detect resume failure: we asked for old_id but got a new one
-                        if expected_session_id and sid != expected_session_id:
-                            self._resume_failed = True
-                        self._session_id = sid
+            while time.monotonic() < deadline:
+                readable, _, _ = select.select([master_fd], [], [], 0.05)
+                if master_fd in readable:
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    collected_raw.append(chunk)
+                    text = chunk.decode("utf-8", errors="replace")
+                    collected_text.append(text)
                     if on_event:
-                        on_event(AgentEvent("done", {
-                            "result": result_text,
-                            "session_id": sid,
-                        }))
+                        on_event(AgentEvent("terminal_output", {"data": text}))
+                else:
+                    # Check if child exited
+                    try:
+                        pid, status = os.waitpid(child_pid, os.WNOHANG)
+                        if pid != 0:
+                            # Drain remaining output
+                            try:
+                                while True:
+                                    rem = os.read(master_fd, 4096)
+                                    if not rem:
+                                        break
+                                    collected_raw.append(rem)
+                                    text = rem.decode("utf-8", errors="replace")
+                                    collected_text.append(text)
+                                    if on_event:
+                                        on_event(AgentEvent("terminal_output", {"data": text}))
+                            except OSError:
+                                pass
+                            break
+                    except ChildProcessError:
+                        break
 
-            self._proc.wait(timeout=600)
-        except subprocess.TimeoutExpired:
-            self._proc.kill()
+            result_text = "".join(collected_text)
+
+            # Capture session_id from a quick json-format run
+            self._capture_session_id_from_result(result_text)
+
             if on_event:
-                on_event(AgentEvent("error", {"error": "Agent timed out after 600s"}))
+                on_event(AgentEvent("done", {
+                    "result": result_text,
+                    "session_id": self._session_id,
+                }))
+
         finally:
-            self._proc = None
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+            try:
+                os.kill(child_pid, signal.SIGTERM)
+                os.waitpid(child_pid, 0)
+            except OSError:
+                pass
+            self._child_pid = None
+            self._master_fd = None
 
         return result_text
 
     def stop(self) -> None:
-        proc = self._proc
-        if proc and proc.poll() is None:
-            proc.terminate()
+        if self._master_fd is not None:
             try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        self._proc = None
+                os.close(self._master_fd)
+            except OSError:
+                pass
+            self._master_fd = None
+        if self._child_pid is not None:
+            try:
+                os.kill(self._child_pid, signal.SIGTERM)
+                try:
+                    os.waitpid(self._child_pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+            except OSError:
+                pass
+            self._child_pid = None
 
     @property
     def is_running(self) -> bool:
-        return self._proc is not None and self._proc.poll() is None
+        if self._child_pid is None:
+            return False
+        try:
+            pid, _ = os.waitpid(self._child_pid, os.WNOHANG)
+            return pid == 0
+        except ChildProcessError:
+            return False
 
     @property
     def session_id(self) -> Optional[str]:
@@ -187,3 +185,34 @@ class ClaudeCodeAdapter:
     @property
     def resume_failed(self) -> bool:
         return self._resume_failed
+
+    # -- Internal --------------------------------------------------------------
+
+    def _capture_session_id_from_result(self, output: str) -> None:
+        """Try to find session_id from CC's output or recent session files."""
+        # Check ~/.claude/projects/ for the most recent session
+        try:
+            if not self._cwd:
+                return
+            # CC stores sessions under a path-based key
+            projects_dir = Path.home() / ".claude" / "projects"
+            if not projects_dir.is_dir():
+                return
+            # Find most recently modified .jsonl file
+            session_files = []
+            for d in projects_dir.iterdir():
+                if d.is_dir():
+                    for f in d.iterdir():
+                        if f.suffix == ".jsonl":
+                            session_files.append(f)
+            if not session_files:
+                return
+            session_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            newest = session_files[0]
+            # The filename (without extension) is the session_id
+            new_sid = newest.stem
+            if self._session_id and new_sid != self._session_id:
+                self._resume_failed = True
+            self._session_id = new_sid
+        except OSError:
+            pass

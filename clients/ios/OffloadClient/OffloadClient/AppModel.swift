@@ -766,8 +766,15 @@ final class AppModel: ObservableObject {
                             }
                         } else if event.eventType == "chat.stream" && isMySession {
                             let evtType = event.payload?["claude_event_type"]?.value ?? ""
-                            if evtType == "assistant", let text = event.payload?["text"]?.value, !text.isEmpty {
-                                // Orchestrator text — append to streaming message
+                            if evtType == "terminal", let data = event.payload?["data"]?.value, !data.isEmpty {
+                                // Raw terminal output — accumulate into terminal message
+                                if let lastIdx = self.chatMessages.indices.last,
+                                   self.chatMessages[lastIdx].role == "terminal" && self.chatMessages[lastIdx].isStreaming {
+                                    self.chatMessages[lastIdx].content += data
+                                } else {
+                                    self.chatMessages.append(ChatMessage(role: "terminal", content: data, isStreaming: true))
+                                }
+                            } else if evtType == "assistant", let text = event.payload?["text"]?.value, !text.isEmpty {
                                 if let lastIdx = self.chatMessages.indices.last,
                                    self.chatMessages[lastIdx].role == "assistant" && self.chatMessages[lastIdx].isStreaming {
                                     self.chatMessages[lastIdx].content += text
@@ -775,29 +782,14 @@ final class AppModel: ObservableObject {
                                     self.chatMessages.append(ChatMessage(role: "assistant", content: text, isStreaming: true))
                                 }
                             } else if evtType == "agent_activity" {
-                                // Coding agent started — just set flag, no chat bubble
                                 self.isAgentWorking = true
-                            } else if evtType == "agent_tool_use" {
-                                // CC tool call — use server-formatted string
-                                let formatted = event.payload?["formatted"]?.value ?? ""
-                                if !formatted.isEmpty {
-                                    self.chatMessages.append(ChatMessage(role: "tool", content: formatted))
-                                }
-                            } else if evtType == "agent_tool_result" {
-                                // Tool output — append as collapsible result
-                                let content = event.payload?["content"]?.value ?? ""
-                                if !content.isEmpty {
-                                    // Attach result to the last tool message
-                                    if let lastIdx = self.chatMessages.indices.last,
-                                       self.chatMessages[lastIdx].role == "tool" {
-                                        self.chatMessages[lastIdx].content += "\n\(content)"
-                                    }
-                                }
-                            } else if evtType == "agent_output" {
-                                // Legacy agent output events
                             } else if evtType == "agent_done" {
-                                // Coding agent finished
                                 self.isAgentWorking = false
+                                // Mark terminal message as done
+                                if let lastIdx = self.chatMessages.indices.last,
+                                   self.chatMessages[lastIdx].role == "terminal" {
+                                    self.chatMessages[lastIdx].isStreaming = false
+                                }
                             } else if evtType == "result" {
                                 if let lastIdx = self.chatMessages.indices.last,
                                    self.chatMessages[lastIdx].role == "assistant" && self.chatMessages[lastIdx].isStreaming {

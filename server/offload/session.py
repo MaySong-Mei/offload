@@ -19,66 +19,6 @@ from .adapters import AgentEvent, ClaudeCodeAdapter, PTYAdapter
 from .event_bus import EventBus
 from .models import EventRecord, utc_now
 
-def _format_tool_call(tool: str, inp: dict) -> str:
-    """Format a tool call for display, matching CC terminal style."""
-    if tool == "Bash":
-        cmd = inp.get("command", "")
-        desc = inp.get("description", "")
-        header = f"$ {cmd}"
-        if desc:
-            header = f"$ {cmd}  # {desc}"
-        return header
-    elif tool == "Read":
-        path = inp.get("file_path", "")
-        parts = [f"Read {path}"]
-        if inp.get("offset"):
-            parts.append(f":{inp['offset']}")
-        if inp.get("limit"):
-            parts.append(f" ({inp['limit']} lines)")
-        return "".join(parts)
-    elif tool == "Edit":
-        path = inp.get("file_path", "")
-        old = inp.get("old_string", "")
-        new = inp.get("new_string", "")
-        lines = [f"Edit {path}"]
-        # Show diff: removed lines and added lines
-        if old:
-            for line in old.split("\n")[:6]:
-                lines.append(f"- {line}")
-            if old.count("\n") > 5:
-                lines.append(f"  ... ({old.count(chr(10))+1} lines)")
-        if new:
-            for line in new.split("\n")[:6]:
-                lines.append(f"+ {line}")
-            if new.count("\n") > 5:
-                lines.append(f"  ... ({new.count(chr(10))+1} lines)")
-        return "\n".join(lines)
-    elif tool == "Write":
-        path = inp.get("file_path", "")
-        content = inp.get("content", "")
-        lines = [f"Write {path}"]
-        if content:
-            for line in content.split("\n")[:8]:
-                lines.append(f"  {line}")
-            if content.count("\n") > 7:
-                lines.append(f"  ... ({content.count(chr(10))+1} lines)")
-        return "\n".join(lines)
-    elif tool == "Grep":
-        pattern = inp.get("pattern", "")
-        path = inp.get("path", ".")
-        return f"Grep '{pattern}' {path}"
-    elif tool == "Glob":
-        pattern = inp.get("pattern", "")
-        return f"Glob {pattern}"
-    elif tool == "Agent":
-        desc = inp.get("description", inp.get("prompt", ""))[:80]
-        return f"Agent: {desc}"
-    else:
-        # Generic fallback
-        params = " ".join(f"{v}" for v in list(inp.values())[:2] if isinstance(v, str))[:80]
-        return f"{tool} {params}".strip()
-
-
 class OffloadSession:
     """A single offload session backed by a Claude Code process."""
 
@@ -286,7 +226,7 @@ class OffloadSessionManager:
         return [
             {"role": m["role"], "content": m["content"]}
             for m in session.messages
-            if m.get("role") in ("user", "assistant", "tool") and isinstance(m.get("content"), str)
+            if m.get("role") in ("user", "assistant", "tool", "terminal") and isinstance(m.get("content"), str)
         ]
 
     # ---- Messaging -----------------------------------------------------------
@@ -425,52 +365,19 @@ class OffloadSessionManager:
 
             self._publish(sid, "chat.stream", {
                 "claude_event_type": "agent_activity",
-                "instruction": prompt[:200],
             })
 
-            # Collected text for the assistant message
-            collected_text: List[str] = []
+            # Collect raw terminal output
+            terminal_chunks: List[str] = []
 
             def _on_event(evt: AgentEvent) -> None:
-                if evt.event_type == "text_output":
-                    text = evt.data.get("text", "")
-                    if text:
-                        collected_text.append(text)
+                if evt.event_type == "terminal_output":
+                    data = evt.data.get("data", "")
+                    if data:
+                        terminal_chunks.append(data)
                         self._publish(sid, "chat.stream", {
-                            "claude_event_type": "assistant",
-                            "text": text,
-                        })
-                elif evt.event_type == "tool_use":
-                    tool = evt.data.get("tool", "")
-                    inp = evt.data.get("input", {})
-                    # Format like CC terminal: tool name + key params
-                    tool_line = _format_tool_call(tool, inp)
-                    session.messages.append({"role": "tool", "content": tool_line})
-                    self._publish(sid, "chat.stream", {
-                        "claude_event_type": "agent_tool_use",
-                        "tool": tool,
-                        "input": inp,
-                        "formatted": tool_line,
-                    })
-                elif evt.event_type == "tool_result":
-                    content = evt.data.get("content", "")
-                    if content:
-                        # Append result to last tool message
-                        for msg in reversed(session.messages):
-                            if msg.get("role") == "tool":
-                                msg["content"] += "\n" + content[:500]
-                                break
-                        self._publish(sid, "chat.stream", {
-                            "claude_event_type": "agent_tool_result",
-                            "content": content,
-                        })
-                elif evt.event_type == "done":
-                    result = evt.data.get("result", "")
-                    if result and not collected_text:
-                        collected_text.append(result)
-                        self._publish(sid, "chat.stream", {
-                            "claude_event_type": "assistant",
-                            "text": result,
+                            "claude_event_type": "terminal",
+                            "data": data,
                         })
 
             # Timeout watchdog — warn at 80%, kill at 100%
@@ -510,11 +417,10 @@ class OffloadSessionManager:
                 # The prompt already contained the user message, and CC started
                 # a fresh session. Next turn will use the new session_id.
 
-            # If no text was streamed but we got a result, use it
-            assistant_content = "".join(collected_text) or result_text or "(no output)"
-
-            # Save assistant message
-            session.messages.append({"role": "assistant", "content": assistant_content})
+            # Save terminal output as a single message
+            raw_output = "".join(terminal_chunks)
+            if raw_output:
+                session.messages.append({"role": "terminal", "content": raw_output})
             session.last_message_at = utc_now()
 
             # Persist CC session_id for resume
@@ -524,7 +430,6 @@ class OffloadSessionManager:
 
             self._publish(sid, "chat.stream", {
                 "claude_event_type": "agent_done",
-                "result_preview": assistant_content[:500],
             })
 
             self._publish(sid, "chat.stream", {
