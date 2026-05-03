@@ -4097,54 +4097,91 @@ private struct ChatBubble: View {
     }
 }
 
-// MARK: - Tool Call Line
+// MARK: - Tool Call Block
 
 private struct ToolCallLine: View {
     let content: String
     @State private var isExpanded = false
 
-    private var header: String {
-        content.components(separatedBy: "\n").first ?? content
+    // Parse "ToolName rest" or "$ command" from the first line
+    private var toolName: String {
+        let first = content.components(separatedBy: "\n").first ?? content
+        if first.hasPrefix("$ ") { return "Bash" }
+        // "Read /path", "Edit /path", "Write /path", "Grep ...", "Glob ..."
+        let parts = first.split(separator: " ", maxSplits: 1)
+        if let name = parts.first { return String(name) }
+        return "Tool"
     }
 
-    private var hasResult: Bool {
-        content.contains("\n")
+    private var toolDetail: String {
+        let first = content.components(separatedBy: "\n").first ?? content
+        if first.hasPrefix("$ ") { return String(first.dropFirst(2)) }
+        let parts = first.split(separator: " ", maxSplits: 1)
+        return parts.count > 1 ? String(parts[1]) : ""
     }
+
+    private var hasResult: Bool { content.contains("\n") }
 
     private var resultText: String {
         let lines = content.components(separatedBy: "\n")
         return lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Header line
-            HStack(spacing: 4) {
-                Text(header)
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(Color(.tertiaryLabel))
-                    .lineLimit(1)
-                Spacer()
-                if hasResult {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(Color(.quaternaryLabel))
-                }
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if hasResult {
-                    withAnimation(.easeInOut(duration: 0.12)) { isExpanded.toggle() }
-                }
-            }
+    private var accentColor: Color {
+        switch toolName {
+        case "Bash": return .orange
+        case "Read": return .blue
+        case "Edit": return .yellow
+        case "Write": return .green
+        case "Grep", "Glob": return .purple
+        case "Agent": return .cyan
+        default: return .gray
+        }
+    }
 
-            // Expandable result
-            if isExpanded && hasResult {
-                Text(resultText)
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(Color(.tertiaryLabel))
-                    .lineLimit(8)
-                    .padding(.top, 2)
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            // Left accent bar
+            RoundedRectangle(cornerRadius: 1)
+                .fill(accentColor.opacity(0.5))
+                .frame(width: 2)
+                .padding(.vertical, 2)
+
+            VStack(alignment: .leading, spacing: 3) {
+                // Header: tool name + detail
+                HStack(spacing: 6) {
+                    Text(toolName)
+                        .font(.system(.caption2, design: .monospaced, weight: .semibold))
+                        .foregroundStyle(accentColor)
+                    Text(toolDetail)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(Color(.secondaryLabel))
+                        .lineLimit(1)
+                    Spacer()
+                    if hasResult {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(Color(.tertiaryLabel))
+                    }
+                }
+
+                // Expandable output
+                if isExpanded && hasResult {
+                    Text(resultText)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(Color(.tertiaryLabel))
+                        .lineLimit(12)
+                        .padding(.top, 1)
+                }
+            }
+            .padding(.leading, 8)
+            .padding(.vertical, 4)
+        }
+        .padding(.horizontal, 2)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if hasResult {
+                withAnimation(.easeInOut(duration: 0.12)) { isExpanded.toggle() }
             }
         }
     }
