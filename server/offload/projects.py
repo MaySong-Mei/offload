@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -13,6 +15,8 @@ from .repo_offload import (
     STATUS_READY,
 )
 
+from .models import utc_now
+
 
 README_NAMES = ["README.md", "README", "readme.md", "Readme.md", "README.MD"]
 MAX_README_BYTES = 256 * 1024  # 256 KB safety cap
@@ -22,22 +26,30 @@ MAX_SCAN_DEPTH = 4
 @dataclass
 class ProjectInfo:
     name: str
-    path: str
+    path: str  # repo path (may be empty for virtual projects)
     has_readme: bool
     is_initialized: bool = False
     init_status: str = STATUS_NOT_INITIALIZED
     summary: Optional[str] = None
     init_error: Optional[str] = None
+    id: Optional[str] = None  # "vp-..." for virtual, defaults to path for repo
+    is_virtual: bool = False
+
+    def __post_init__(self):
+        if self.id is None:
+            self.id = self.path
 
     def to_json_dict(self) -> dict:
         return {
+            "id": self.id,
             "name": self.name,
-            "path": self.path,
+            "path": self.path or None,
             "has_readme": self.has_readme,
             "is_initialized": self.is_initialized,
             "init_status": self.init_status,
             "summary": self.summary,
             "init_error": self.init_error,
+            "is_virtual": self.is_virtual,
         }
 
 
@@ -468,6 +480,92 @@ def _parse_architecture_tree(md: str, project_name: str) -> Dict[str, Any]:
         current_h2["children"].extend(_extract_modules(body))
 
     return root
+
+
+class VirtualProjectManager:
+    """Manages virtual (non-repo) projects stored in .offload/projects.json."""
+
+    def __init__(self, workspace_root: Path):
+        self._path = workspace_root / "projects.json"
+
+    def _load(self) -> List[Dict[str, Any]]:
+        if not self._path.is_file():
+            return []
+        try:
+            return json.loads(self._path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return []
+
+    def _save(self, projects: List[Dict[str, Any]]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(projects, indent=2))
+        tmp.rename(self._path)
+
+    def list_projects(self) -> List[ProjectInfo]:
+        return [
+            ProjectInfo(
+                name=p["name"],
+                path=p.get("repo_path", ""),
+                has_readme=False,
+                is_initialized=bool(p.get("repo_path")),
+                init_status="ready" if p.get("repo_path") else "not_initialized",
+                summary=p.get("summary"),
+                id=p["id"],
+                is_virtual=True,
+            )
+            for p in self._load()
+        ]
+
+    def create_project(self, name: str, repo_path: Optional[str] = None) -> ProjectInfo:
+        projects = self._load()
+        project_id = f"vp-{uuid.uuid4().hex[:10]}"
+        entry = {
+            "id": project_id,
+            "name": name,
+            "repo_path": repo_path,
+            "created_at": utc_now(),
+            "summary": None,
+        }
+        projects.append(entry)
+        self._save(projects)
+        return ProjectInfo(
+            name=name,
+            path=repo_path or "",
+            has_readme=False,
+            is_initialized=bool(repo_path),
+            init_status="ready" if repo_path else "not_initialized",
+            id=project_id,
+            is_virtual=True,
+        )
+
+    def update_project(self, project_id: str, **kwargs) -> Optional[ProjectInfo]:
+        projects = self._load()
+        for p in projects:
+            if p["id"] == project_id:
+                for k, v in kwargs.items():
+                    p[k] = v
+                self._save(projects)
+                return ProjectInfo(
+                    name=p["name"],
+                    path=p.get("repo_path", ""),
+                    has_readme=False,
+                    is_initialized=bool(p.get("repo_path")),
+                    init_status="ready" if p.get("repo_path") else "not_initialized",
+                    summary=p.get("summary"),
+                    id=p["id"],
+                    is_virtual=True,
+                )
+        return None
+
+    def get_repo_path(self, project_id: str) -> Optional[str]:
+        """Resolve repo path for a project ID (virtual or path-based)."""
+        if not project_id.startswith("vp-"):
+            return project_id  # It's already a path
+        for p in self._load():
+            if p["id"] == project_id:
+                return p.get("repo_path")
+        return None
 
 
 def _git_recent_commits(repo_path: Path, limit: int = 10) -> List[Dict[str, str]]:

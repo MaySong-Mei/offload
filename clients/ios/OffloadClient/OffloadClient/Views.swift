@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 // MARK: - Shared Helpers
 
@@ -59,9 +60,15 @@ struct RootView: View {
                                 ProjectPickerPill(model: model)
                             }
                             ToolbarItem(placement: .navigationBarTrailing) {
-                                Button { toggleRightPanel() } label: {
-                                    Image(systemName: "square.stack.3d.up")
-                                        .font(.body.weight(.medium))
+                                HStack(spacing: 16) {
+                                    Button { model.openTerminal() } label: {
+                                        Image(systemName: "terminal")
+                                            .font(.body.weight(.medium))
+                                    }
+                                    Button { toggleRightPanel() } label: {
+                                        Image(systemName: "square.stack.3d.up")
+                                            .font(.body.weight(.medium))
+                                    }
                                 }
                             }
                         }
@@ -140,6 +147,11 @@ struct RootView: View {
         .sheet(isPresented: $showingSettings) {
             SettingsSheet(model: model)
         }
+        .fullScreenCover(isPresented: $model.showTerminal) {
+            NavigationStack {
+                TerminalView(model: model, projectPath: model.terminalProjectPath)
+            }
+        }
         .task {
             model.bootstrap()
         }
@@ -214,36 +226,12 @@ private struct ChatSidebarView: View {
     @Binding var showingSettings: Bool
     var onDismiss: () -> Void
     var onOpenProject: (String, String) -> Void
-    var expandFraction: CGFloat = 0  // 0 = compact (300pt), 1 = full screen
+    var expandFraction: CGFloat = 0
 
-    private var projectSessions: [(project: String, name: String, sessions: [ChatSessionSummary])] {
-        let grouped = Dictionary(grouping: model.chatSessions.filter { $0.project != nil }) { $0.project! }
-        return grouped.map { path, sessions in
-            let name = model.projects.first(where: { $0.path == path })?.name
-                ?? (path as NSString).lastPathComponent
-            return (project: path, name: name, sessions: sessions)
-        }
-        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
-    private var ideaSessions: [ChatSessionSummary] {
-        model.chatSessions.filter { $0.project == nil }
-    }
-
-    @State private var expandedProjects: Set<String> = []
-
-    private func projectSessionCount(for path: String) -> Int {
-        model.chatSessions.filter { $0.project == path }.count
-    }
-
-    private func sessionsForProject(_ path: String) -> [ChatSessionSummary] {
-        model.chatSessions.filter { $0.project == path }
-    }
-
-    private func projectName(for path: String?) -> String? {
-        guard let path else { return nil }
-        return model.projects.first(where: { $0.path == path })?.name
-            ?? (path as NSString).lastPathComponent
+    private func projectName(for projectId: String?) -> String? {
+        guard let projectId else { return nil }
+        return model.projects.first(where: { $0.id == projectId })?.name
+            ?? (projectId as NSString).lastPathComponent
     }
 
     @State private var showingDashboard = false
@@ -252,7 +240,7 @@ private struct ChatSidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header — tappable to open dashboard
+            // Header
             Button {
                 showingDashboard = true
             } label: {
@@ -275,18 +263,6 @@ private struct ChatSidebarView: View {
                         Text(model.statusMessage)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        if isExtended {
-                            Text("·")
-                                .foregroundStyle(.tertiary)
-                            Text("\(model.projects.filter { $0.isInitialized }.count) projects")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text("·")
-                                .foregroundStyle(.tertiary)
-                            Text("\(model.chatSessions.count) chats")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
                         Spacer()
                         Image(systemName: "chevron.right")
                             .font(.caption2)
@@ -305,110 +281,24 @@ private struct ChatSidebarView: View {
                 ServerDashboardSheet(model: model)
             }
 
-            // Session list
+            // Flat timeline — all sessions by recency
             List {
-                // Projects section
-                if !model.projects.isEmpty {
-                    Section {
-                        ForEach(model.projects.filter { $0.isInitialized }) { project in
-                            let count = projectSessionCount(for: project.path)
-                            let isExpanded = expandedProjects.contains(project.path) || isExtended
-
-                            // Project row
-                            HStack(spacing: 10) {
-                                Button {
-                                    onOpenProject(project.path, project.name)
-                                } label: {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "folder.fill")
-                                            .foregroundStyle(Color.accentColor)
-                                            .font(isExtended ? .title3 : .body)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(project.name)
-                                                .font(isExtended ? .body.weight(.medium) : .subheadline)
-                                                .foregroundStyle(.primary)
-                                            if isExtended, let summary = project.summary, !summary.isEmpty {
-                                                Text(summary)
-                                                    .font(.caption)
-                                                    .foregroundStyle(.secondary)
-                                                    .lineLimit(2)
-                                            }
-                                        }
-                                    }
-                                }
-                                .buttonStyle(.plain)
-
-                                Spacer()
-
-                                if !isExtended {
-                                    Button {
-                                        withAnimation(.easeInOut(duration: 0.2)) {
-                                            if expandedProjects.contains(project.path) {
-                                                expandedProjects.remove(project.path)
-                                            } else {
-                                                expandedProjects.insert(project.path)
-                                            }
-                                        }
-                                    } label: {
-                                        HStack(spacing: 4) {
-                                            if count > 0 {
-                                                Text("\(count)")
-                                                    .font(.caption2)
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                            Image(systemName: expandedProjects.contains(project.path) ? "chevron.down" : "chevron.right")
-                                                .font(.caption2)
-                                                .foregroundStyle(.tertiary)
-                                        }
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(Color(.systemGray5), in: Capsule())
-                                    }
-                                    .buttonStyle(.plain)
-                                } else {
-                                    Text("\(count) chats")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-
-                            // Sessions — auto-expanded in extended mode
-                            if isExpanded {
-                                ForEach(sessionsForProject(project.path)) { session in
-                                    ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID)
-                                        .padding(.leading, isExtended ? 28 : 20)
-                                        .contentShape(Rectangle())
-                                        .onTapGesture {
-                                            model.selectChatSession(session.sessionId)
-                                            onDismiss()
-                                        }
-                                }
-                            }
-                        }
-                    } header: {
-                        Text("Projects")
-                    }
-                }
-
-                // Recents — sessions without a project
-                if !ideaSessions.isEmpty {
-                    Section {
-                        ForEach(ideaSessions) { session in
-                            ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    model.selectChatSession(session.sessionId)
-                                    onDismiss()
-                                }
-                        }
-                    } header: {
-                        Text("Recents")
+                ForEach(model.chatSessions) { session in
+                    ChatSessionRow(
+                        session: session,
+                        isSelected: session.sessionId == model.selectedChatSessionID,
+                        projectName: projectName(for: session.project)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        model.selectChatSession(session.sessionId)
+                        onDismiss()
                     }
                 }
             }
             .listStyle(.plain)
 
-            // Bottom: New Chat button
+            // Bottom: New Chat
             HStack {
                 Spacer()
                 Button {
@@ -425,23 +315,6 @@ private struct ChatSidebarView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-
-            // Project chat menu
-            if !model.projects.isEmpty {
-                Menu {
-                    ForEach(model.projects) { project in
-                        Button(project.name) {
-                            Task { await model.createChatSession(project: project.path) }
-                            onDismiss()
-                        }
-                    }
-                } label: {
-                    Label("Project Chat", systemImage: "folder.badge.plus")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.bottom, 8)
-            }
         }
     }
 }
@@ -561,7 +434,7 @@ private struct RightPanelView: View {
                     Image(systemName: "folder.fill")
                         .font(.caption)
                         .foregroundStyle(Color.accentColor)
-                    Text(model.projects.first { $0.path == project }?.name ?? (project as NSString).lastPathComponent)
+                    Text(model.projects.first { $0.id == project }?.name ?? (project as NSString).lastPathComponent)
                         .font(.caption.weight(.medium))
                     Spacer()
                 }
@@ -787,7 +660,7 @@ private struct ProjectsView: View {
             Section {
                 ForEach(model.projects) { project in
                     ProjectCard(model: model, project: project)
-                        .tag(project.path)
+                        .tag(project.id)
                         .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                 }
             } header: {
@@ -860,12 +733,12 @@ private struct ProjectCard: View {
     @State private var showingFullLog = false
 
     private var topicCount: Int {
-        model.topics.filter { $0.project == project.path }.count
+        model.topics.filter { $0.project == project.id }.count
     }
 
     private var activeTopicCount: Int {
         model.topics.filter {
-            $0.project == project.path &&
+            $0.project == project.id &&
             ($0.executionState == .queued || $0.executionState == .implementing)
         }.count
     }
@@ -888,7 +761,7 @@ private struct ProjectCard: View {
                 }
                 .buttonStyle(.plain)
             }
-            InitLogPreview(log: model.projectInitLogs[project.path] ?? [], onTap: { showingFullLog = true })
+            InitLogPreview(log: model.projectInitLogs[project.id] ?? [], onTap: { showingFullLog = true })
         }
     }
 
@@ -904,7 +777,7 @@ private struct ProjectCard: View {
                     Text(project.name)
                         .font(.headline)
                         .lineLimit(1)
-                    Text(project.path)
+                    Text(project.path ?? project.id)
                         .font(.caption2.monospaced())
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
@@ -915,6 +788,11 @@ private struct ProjectCard: View {
 
                 if project.isInitialized || project.initStatus == "failed" {
                     Menu {
+                        Button {
+                            model.openTerminal(for: project.path ?? project.id)
+                        } label: {
+                            Label("Open Terminal", systemImage: "terminal")
+                        }
                         if project.initStatus == "ready" {
                             Button {
                                 showingReinitConfirm = true
@@ -1052,7 +930,7 @@ private struct ProjectDashboardView: View {
     private var projectName: String {
         if let key = model.selectedProjectKey {
             if key.isEmpty { return "Ungrouped" }
-            if let p = model.projects.first(where: { $0.path == key }) { return p.name }
+            if let p = model.projects.first(where: { $0.id == key }) { return p.name }
             return (key as NSString).lastPathComponent
         }
         return "Dashboard"
@@ -1060,7 +938,7 @@ private struct ProjectDashboardView: View {
 
     private var selectedProject: ProjectInfo? {
         guard let key = model.selectedProjectKey else { return nil }
-        return model.projects.first { $0.path == key }
+        return model.projects.first { $0.id == key }
     }
 
     // --- Agent activity (used by meta card) ---
@@ -1181,6 +1059,11 @@ private struct ProjectDashboardView: View {
         .navigationTitle(projectName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button { model.openTerminal() } label: {
+                    Image(systemName: "terminal")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button { showingNewTopicSheet = true } label: {
@@ -2350,7 +2233,7 @@ private struct InitLogSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     private var log: [String] {
-        model.projectInitLogs[project.path] ?? []
+        model.projectInitLogs[project.id] ?? []
     }
 
     var body: some View {
@@ -2834,7 +2717,7 @@ private struct NewTopicSheet: View {
                             Divider()
                             ForEach(model.projects) { p in
                                 Button {
-                                    project = p.path
+                                    project = p.id
                                 } label: {
                                     Label(p.name, systemImage: p.hasReadme ? "doc.text" : "folder")
                                 }
@@ -3852,7 +3735,7 @@ struct ChatView: View {
             // Messages
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    LazyVStack(alignment: .leading, spacing: 2) {
                         if model.chatMessages.isEmpty {
                             VStack(spacing: 12) {
                                 Image(systemName: "bubble.left.and.text.bubble.right")
@@ -3872,18 +3755,17 @@ struct ChatView: View {
                         ForEach(model.chatMessages) { message in
                             ChatBubble(message: message, model: model)
                                 .id(message.id)
+                                .transition(.opacity)
                         }
-                        if model.isChatStreaming, let last = model.chatMessages.last,
-                           !(last.role == "assistant" && last.isStreaming) {
+                        if model.isAgentWorking || model.isChatStreaming {
                             HStack(spacing: 6) {
                                 ProgressView()
                                     .controlSize(.small)
-                                Text("Thinking…")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .tint(Color(.systemGray3))
                             }
-                            .padding(.horizontal)
-                            .id("typing")
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .id("working")
                         }
                     }
                     .padding(.vertical, 12)
@@ -3914,12 +3796,26 @@ struct ChatView: View {
                 .focused($isInputFocused)
                 .onSubmit { sendMessage() }
 
-            Button(action: sendMessage) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.title2)
-                    .foregroundStyle(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary : Color.accentColor)
+            if model.isChatStreaming || model.isAgentWorking {
+                Button {
+                    Task {
+                        await model.cancelChat()
+                        inputText = model.lastSentMessage
+                        model.lastSentMessage = ""
+                    }
+                } label: {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.red)
+                }
+            } else {
+                Button(action: sendMessage) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary : Color.accentColor)
+                }
+                .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isChatStreaming)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -3949,15 +3845,13 @@ private struct ProjectPickerPill: View {
         return model.chatSessions.first { $0.sessionId == sid }
     }
 
-    private var currentProjectName: String? {
-        guard let path = currentSession?.project else { return nil }
-        return model.projects.first { $0.path == path }?.name
-            ?? (path as NSString).lastPathComponent
-    }
-
     private var displayLabel: String {
         if model.isChatStreaming { return "Thinking…" }
-        return currentProjectName ?? "Offload"
+        if let path = model.defaultProjectID {
+            return model.projects.first { $0.id == path }?.name
+                ?? (path as NSString).lastPathComponent
+        }
+        return "Offload"
     }
 
     var body: some View {
@@ -3986,7 +3880,7 @@ private struct ProjectPickerPill: View {
 
                 ForEach(model.projects.filter { $0.isInitialized }) { project in
                     Button {
-                        Task { await model.createChatSession(project: project.path) }
+                        Task { await model.createChatSession(project: project.id) }
                     } label: {
                         Label(project.name, systemImage: "folder.fill")
                     }
@@ -4016,37 +3910,346 @@ private struct ChatBubble: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        if let card = message.card {
-            ChatCardView(card: card, model: model)
-                .padding(.horizontal, 12)
-        } else if message.role == "system" {
+        switch message.role {
+        case "tool":
+            ToolCallLine(content: message.content)
+                .padding(.horizontal, 16)
+
+        case "system":
+            Text(message.content)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+
+        case "user":
             HStack {
-                Spacer()
-                Text(message.content)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 2)
-        } else {
-            HStack {
-                if message.role == "user" { Spacer(minLength: 60) }
+                Spacer(minLength: 48)
                 Text(message.content)
                     .font(.body)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(
-                        message.role == "user"
-                            ? Color.accentColor.opacity(0.15)
-                            : Color(.systemGray6),
-                        in: RoundedRectangle(cornerRadius: 12)
-                    )
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
                     .textSelection(.enabled)
-                if message.role == "assistant" { Spacer(minLength: 60) }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 14)
+            .padding(.top, 16)
+            .padding(.bottom, 4)
+
+        default:
+            // Assistant — plain text, generous spacing
+            if let card = message.card {
+                ChatCardView(card: card, model: model)
+                    .padding(.horizontal, 14)
+            } else {
+                MarkdownContentView(text: message.content)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 2)
+                    .textSelection(.enabled)
+            }
         }
+    }
+}
+
+// MARK: - Inline Terminal View
+
+private class InlineTerminalCoordinator: NSObject, WKScriptMessageHandler {
+    var onHeight: ((CGFloat) -> Void)?
+
+    func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any] else { return }
+        if let height = body["height"] as? CGFloat {
+            DispatchQueue.main.async { self.onHeight?(height) }
+        }
+    }
+}
+
+private struct InlineTerminalView: View {
+    let content: String
+    @State private var contentHeight: CGFloat = 60
+
+    var body: some View {
+        InlineTerminalWebView(content: content, height: $contentHeight)
+            .frame(height: min(contentHeight, 400))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct InlineTerminalWebView: UIViewRepresentable {
+    let content: String
+    @Binding var height: CGFloat
+
+    func makeCoordinator() -> InlineTerminalCoordinator {
+        let coord = InlineTerminalCoordinator()
+        coord.onHeight = { h in height = h }
+        return coord
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.userContentController.add(
+            WeakScriptMessageHandler(context.coordinator), name: "terminalSize"
+        )
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.isOpaque = false
+        webView.backgroundColor = UIColor(red: 0.96, green: 0.96, blue: 0.96, alpha: 1)
+        webView.scrollView.isScrollEnabled = true
+        webView.scrollView.bounces = false
+
+        if let htmlURL = Bundle.main.url(forResource: "terminalInline", withExtension: "html") {
+            webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
+        }
+
+        // Write content after page loads — use base64 to safely pass ANSI codes
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            if let data = content.data(using: .utf8) {
+                let b64 = data.base64EncodedString()
+                webView.evaluateJavaScript("writeBase64('\(b64)');", completionHandler: nil)
+            }
+        }
+
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: InlineTerminalCoordinator) {
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "terminalSize")
+    }
+}
+
+// MARK: - Tool Call Block
+
+private struct ToolCallLine: View {
+    let content: String
+    @State private var isExpanded = false
+
+    private var toolName: String {
+        content.components(separatedBy: "\n").first ?? content
+    }
+
+    // First line of the detail (file path or command)
+    private var toolDetail: String {
+        let lines = content.components(separatedBy: "\n")
+        guard lines.count > 1 else { return "" }
+        return String(lines[1].prefix(120))
+    }
+
+    // Everything between header and --- separator (diff content)
+    private var diffContent: String {
+        let parts = content.components(separatedBy: "\n---\n")
+        let body = parts[0]
+        let lines = body.components(separatedBy: "\n")
+        // Skip tool name (line 0) and detail/path (line 1)
+        guard lines.count > 2 else { return "" }
+        return lines[2...].joined(separator: "\n")
+    }
+
+    // Content after --- separator (tool execution result)
+    private var resultText: String {
+        guard let range = content.range(of: "\n---\n") else { return "" }
+        return String(content[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var hasExpandableContent: Bool {
+        !diffContent.isEmpty || !resultText.isEmpty
+    }
+
+    private func lineColor(_ line: String) -> Color {
+        if line.hasPrefix("+ ") { return .green }
+        if line.hasPrefix("- ") { return .red }
+        return Color(.tertiaryLabel)
+    }
+
+    private var accentColor: Color {
+        switch toolName {
+        case "Bash": return .orange
+        case "Read": return .blue
+        case "Edit": return .yellow
+        case "Write": return .green
+        case "Grep", "Glob": return .purple
+        case "Agent": return .cyan
+        default: return .gray
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            // Left accent bar
+            RoundedRectangle(cornerRadius: 1)
+                .fill(accentColor.opacity(0.5))
+                .frame(width: 2)
+                .padding(.vertical, 2)
+
+            VStack(alignment: .leading, spacing: 3) {
+                // Header: tool name + detail
+                HStack(spacing: 6) {
+                    Text(toolName)
+                        .font(.system(.caption2, design: .monospaced, weight: .semibold))
+                        .foregroundStyle(accentColor)
+                    Text(toolDetail)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(Color(.secondaryLabel))
+                        .lineLimit(1)
+                    Spacer()
+                    if hasExpandableContent {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(Color(.tertiaryLabel))
+                    }
+                }
+
+                // Expandable: diff content + tool result
+                if isExpanded && hasExpandableContent {
+                    VStack(alignment: .leading, spacing: 0) {
+                        // Diff lines (Edit: -/+ lines, Write: + lines)
+                        if !diffContent.isEmpty {
+                            ForEach(Array(diffContent.components(separatedBy: "\n").prefix(30).enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .foregroundStyle(lineColor(line))
+                                    .lineLimit(1)
+                            }
+                        }
+                        // Tool execution result
+                        if !resultText.isEmpty {
+                            if !diffContent.isEmpty {
+                                Divider().padding(.vertical, 2)
+                            }
+                            Text(resultText)
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(Color(.tertiaryLabel))
+                                .lineLimit(8)
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+            }
+            .padding(.leading, 8)
+            .padding(.vertical, 4)
+        }
+        .padding(.horizontal, 2)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if hasExpandableContent {
+                withAnimation(.easeInOut(duration: 0.12)) { isExpanded.toggle() }
+            }
+        }
+    }
+}
+
+// MARK: - Markdown Rendering
+
+private struct MarkdownContentView: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(parseBlocks(text).enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .code(let lang, let code):
+                    CodeBlockView(language: lang, code: code)
+                case .text(let content):
+                    if !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(inlineMarkdown(content))
+                            .font(.body)
+                    }
+                }
+            }
+        }
+    }
+
+    // Parse text into code blocks and regular text blocks
+    private func parseBlocks(_ input: String) -> [MarkdownBlock] {
+        var blocks: [MarkdownBlock] = []
+        let lines = input.components(separatedBy: "\n")
+        var i = 0
+        var textBuffer: [String] = []
+
+        while i < lines.count {
+            let line = lines[i]
+            if line.hasPrefix("```") {
+                // Flush text buffer
+                if !textBuffer.isEmpty {
+                    blocks.append(.text(textBuffer.joined(separator: "\n")))
+                    textBuffer = []
+                }
+                // Extract language hint
+                let lang = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                var codeLines: [String] = []
+                i += 1
+                while i < lines.count && !lines[i].hasPrefix("```") {
+                    codeLines.append(lines[i])
+                    i += 1
+                }
+                blocks.append(.code(lang.isEmpty ? nil : lang, codeLines.joined(separator: "\n")))
+                i += 1 // skip closing ```
+            } else {
+                textBuffer.append(line)
+                i += 1
+            }
+        }
+        if !textBuffer.isEmpty {
+            blocks.append(.text(textBuffer.joined(separator: "\n")))
+        }
+        return blocks
+    }
+
+    // Convert inline markdown to AttributedString
+    private func inlineMarkdown(_ text: String) -> AttributedString {
+        // Use iOS built-in markdown parsing
+        if let attributed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            return attributed
+        }
+        return AttributedString(text)
+    }
+}
+
+private enum MarkdownBlock {
+    case text(String)
+    case code(String?, String)  // (language, code)
+}
+
+private struct CodeBlockView: View {
+    let language: String?
+    let code: String
+
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header with language label + copy button
+            HStack {
+                if let lang = language, !lang.isEmpty {
+                    Text(lang)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = code
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color(.systemGray5))
+
+            // Code content
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code)
+                    .font(.system(.caption, design: .monospaced))
+                    .padding(10)
+            }
+        }
+        .background(Color(.systemGray5).opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -4101,5 +4304,148 @@ private struct ChatCardView: View {
         }
         .padding(12)
         .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+// MARK: - Terminal
+
+struct TerminalView: View {
+    @ObservedObject var model: AppModel
+    var projectPath: String?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        TerminalWebView(model: model, projectPath: projectPath)
+            .ignoresSafeArea(.all, edges: .bottom)
+            .navigationTitle("Terminal")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+    }
+}
+
+/// Weak wrapper to avoid WKWebView retain cycle on script message handlers.
+private class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var delegate: WKScriptMessageHandler?
+    init(_ delegate: WKScriptMessageHandler) { self.delegate = delegate }
+    func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
+        delegate?.userContentController(c, didReceive: message)
+    }
+}
+
+struct TerminalWebView: UIViewRepresentable {
+    @ObservedObject var model: AppModel
+    var projectPath: String?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.userContentController.add(WeakScriptMessageHandler(context.coordinator), name: "terminalEvent")
+        // Allow inline media playback
+        config.allowsInlineMediaPlayback = true
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.isOpaque = false
+        webView.backgroundColor = UIColor(red: 0.118, green: 0.118, blue: 0.118, alpha: 1) // #1e1e1e
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.bounces = false
+
+        context.coordinator.webView = webView
+
+        // Load terminal.html from bundle
+        if let htmlURL = Bundle.main.url(forResource: "terminal", withExtension: "html") {
+            webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
+        }
+
+        // Build the WebSocket URL for pty
+        context.coordinator.buildAndConnect(model: model, projectPath: projectPath)
+
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "terminalEvent")
+    }
+
+    class Coordinator: NSObject, WKScriptMessageHandler {
+        weak var webView: WKWebView?
+        private var didConnect = false
+
+        func buildAndConnect(model: AppModel, projectPath: String?) {
+            // Wait for page load, then call connectPTY
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.connect(model: model, projectPath: projectPath)
+            }
+        }
+
+        private func connect(model: AppModel, projectPath: String?) {
+            guard let webView = webView else { return }
+            guard !didConnect else { return }
+
+            // Build WebSocket URL from server base URL
+            let baseURL = model.serverURLString.trimmingCharacters(in: .whitespaces)
+            guard !baseURL.isEmpty else { return }
+
+            var wsBase = baseURL
+            if wsBase.hasPrefix("http://") {
+                wsBase = "ws://" + wsBase.dropFirst(7)
+            } else if wsBase.hasPrefix("https://") {
+                wsBase = "wss://" + wsBase.dropFirst(8)
+            } else {
+                wsBase = "ws://" + wsBase
+            }
+            // Remove trailing slash
+            if wsBase.hasSuffix("/") { wsBase = String(wsBase.dropLast()) }
+
+            var ptyURL = "\(wsBase)/pty"
+            var params: [String] = []
+            if let path = projectPath, !path.isEmpty {
+                let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? path
+                params.append("cwd=\(encoded)")
+            }
+            if !model.apiToken.isEmpty {
+                let encoded = model.apiToken.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? model.apiToken
+                params.append("token=\(encoded)")
+            }
+            if !params.isEmpty {
+                ptyURL += "?" + params.joined(separator: "&")
+            }
+
+            // JSON-encode the URL to prevent JS injection
+            if let jsonData = try? JSONSerialization.data(withJSONObject: ptyURL),
+               let jsonStr = String(data: jsonData, encoding: .utf8) {
+                let js = "connectPTY(\(jsonStr));"
+                webView.evaluateJavaScript(js) { _, error in
+                    if let error = error {
+                        print("Terminal connect error: \(error)")
+                    }
+                }
+            }
+            didConnect = true
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: Any],
+                  let type = body["type"] as? String else { return }
+            switch type {
+            case "ready":
+                print("Terminal ready")
+            case "closed":
+                print("Terminal connection closed")
+            default:
+                break
+            }
+        }
     }
 }

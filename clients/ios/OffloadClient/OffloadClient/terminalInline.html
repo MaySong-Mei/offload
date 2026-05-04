@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #f5f5f5; }
+  #terminal { width: 100%; height: 100%; }
+  .xterm { padding: 4px; }
+</style>
+<link rel="stylesheet" href="xterm.min.css">
+</head>
+<body>
+<div id="terminal"></div>
+<script src="xterm.min.js"></script>
+<script src="addon-fit.min.js"></script>
+<script>
+(function() {
+  const term = new Terminal({
+    cursorBlink: false,
+    cursorStyle: 'bar',
+    disableStdin: true,
+    scrollback: 0,
+    fontSize: 12,
+    lineHeight: 1.2,
+    fontFamily: 'Menlo, Monaco, monospace',
+    theme: {
+      background: '#f5f5f5',
+      foreground: '#1a1a1a',
+      cursor: '#f5f5f5',
+      selectionBackground: '#b4d7ff',
+      black: '#1a1a1a',
+      red: '#c7254e',
+      green: '#2e7d32',
+      yellow: '#a05a00',
+      blue: '#1565c0',
+      magenta: '#8e24aa',
+      cyan: '#00838f',
+      white: '#f5f5f5',
+      brightBlack: '#6e6e6e',
+      brightRed: '#e53935',
+      brightGreen: '#43a047',
+      brightYellow: '#f9a825',
+      brightBlue: '#1e88e5',
+      brightMagenta: '#ab47bc',
+      brightCyan: '#00acc1',
+      brightWhite: '#ffffff'
+    },
+    allowProposedApi: true
+  });
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(document.getElementById('terminal'));
+  fitAddon.fit();
+
+  function reportHeight() {
+    setTimeout(function() {
+      var rows = term.buffer.active.cursorY + 1;
+      var lineHeight = 12 * 1.2;
+      var height = Math.max(rows * lineHeight + 16, 40);
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.terminalSize) {
+        window.webkit.messageHandlers.terminalSize.postMessage({ height: height, rows: rows });
+      }
+    }, 50);
+  }
+
+  // Write base64-encoded content (safe for ANSI escape codes)
+  window.writeBase64 = function(b64) {
+    try {
+      var raw = atob(b64);
+      term.write(raw);
+    } catch(e) {
+      term.write('[decode error]');
+    }
+    reportHeight();
+  };
+
+  // Notify ready
+  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.terminalSize) {
+    window.webkit.messageHandlers.terminalSize.postMessage({ height: 40, rows: 1, ready: true });
+  }
+})();
+</script>
+</body>
+</html>

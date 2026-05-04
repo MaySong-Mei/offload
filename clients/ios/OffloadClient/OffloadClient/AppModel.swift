@@ -35,13 +35,35 @@ final class AppModel: ObservableObject {
     @Published var selectedChatSessionID: String?
     @Published var chatMessages: [ChatMessage] = []
     @Published var isChatStreaming = false
+    @Published var isAgentWorking = false
+    @Published var lastSentMessage = ""  // for cancel → restore to input
+
+    /// Best-effort project ID: current session's project → selected key → first initialized
+    var defaultProjectID: String? {
+        if let sid = selectedChatSessionID,
+           let session = chatSessions.first(where: { $0.sessionId == sid }),
+           let p = session.project, !p.isEmpty {
+            return p
+        }
+        if let key = selectedProjectKey, !key.isEmpty { return key }
+        return projects.first(where: { $0.isInitialized })?.id
+    }
+
+    // Terminal
+    @Published var terminalProjectPath: String?
+    @Published var showTerminal = false
+
+    func openTerminal(for projectPath: String? = nil) {
+        terminalProjectPath = projectPath ?? selectedProjectKey
+        showTerminal = true
+    }
 
     // Combined list: server-discovered projects + projects referenced by topics + ungrouped slot
     var allProjectGroups: [(key: String, name: String, hasReadme: Bool, topicCount: Int)] {
         var groups: [String: (name: String, hasReadme: Bool, count: Int)] = [:]
         // Start from discovered projects (so empty repos still appear)
         for p in projects {
-            groups[p.path] = (p.name, p.hasReadme, 0)
+            groups[p.id] = (p.name, p.hasReadme, 0)
         }
         // Walk topics
         var ungroupedCount = 0
@@ -196,9 +218,12 @@ final class AppModel: ObservableObject {
                 selectedTopicDetail = try await client.fetchTopicDetail(topicID: selectedTopicID)
                 try? await localStore.saveTopicDetail(selectedTopicDetail!, topicID: selectedTopicID)
             }
-            // Load chat sessions
+            // Load chat sessions and restore last active session
             if let sessions = try? await client.fetchChatSessions() {
                 chatSessions = sessions
+                if selectedChatSessionID == nil, let latest = sessions.first {
+                    selectChatSession(latest.sessionId)
+                }
             }
 
             statusMessage = "Connected"
@@ -283,10 +308,53 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func sendChatMessage(_ message: String) async {
+    func createProject(name: String) async {
+        guard let client = makeClient() else { return }
+        do {
+            struct Body: Codable { let name: String }
+            let project = try await client.createVirtualProject(name: name)
+            projects.append(project)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func cancelChat() async {
         guard let sessionID = selectedChatSessionID else { return }
         guard let client = makeClient() else { return }
+        _ = try? await client.cancelChatSession(sessionID: sessionID)
 
+        // Remove the user's last message and any partial assistant/tool messages
+        // that came after it, and restore the user message to input
+        while let last = chatMessages.last {
+            if last.role == "user" {
+                lastSentMessage = last.content
+                chatMessages.removeLast()
+                break
+            }
+            chatMessages.removeLast()
+        }
+    }
+
+    func sendChatMessage(_ message: String) async {
+        guard let client = makeClient() else { return }
+
+        // Auto-create session if none selected
+        if selectedChatSessionID == nil {
+            do {
+                let project = defaultProjectID
+                let session = try await client.createChatSession(project: project)
+                chatSessions.insert(session, at: 0)
+                selectedChatSessionID = session.sessionId
+            } catch {
+                chatMessages.append(ChatMessage(role: "system", content: "Failed to create session: \(error.localizedDescription)"))
+                return
+            }
+        }
+
+        guard let sessionID = selectedChatSessionID else { return }
+
+        lastSentMessage = message
         chatMessages.append(ChatMessage(role: "user", content: message))
         isChatStreaming = true
 
@@ -594,7 +662,7 @@ final class AppModel: ObservableObject {
     func cancelInit(_ project: ProjectInfo) async {
         guard let client = makeClient() else { return }
         do {
-            try await client.cancelInit(projectPath: project.path)
+            try await client.cancelInit(projectPath: project.path ?? "")
             let fresh = try await client.fetchProjects()
             projects = fresh
         } catch {
@@ -606,11 +674,11 @@ final class AppModel: ObservableObject {
         guard let client = makeClient() else { return }
         do {
             // Server does the deletion; only update UI after server confirms success.
-            try await client.uninitializeProject(projectPath: project.path)
+            try await client.uninitializeProject(projectPath: project.path ?? "")
             // Reload from server — the real state after deletion.
             let fresh = try await client.fetchProjects()
             projects = fresh
-            projectInitLogs.removeValue(forKey: project.path)
+            projectInitLogs.removeValue(forKey: project.path ?? "" ?? "")
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -619,7 +687,7 @@ final class AppModel: ObservableObject {
     func initializeProject(_ project: ProjectInfo) async {
         guard let client = makeClient() else { return }
         do {
-            try await client.initializeProject(projectPath: project.path)
+            try await client.initializeProject(projectPath: project.path ?? "")
             // Reload once to get the authoritative "initializing" status.
             // From here, WebSocket events drive UI updates (no polling).
             if let fresh = try? await client.fetchProjects() {
@@ -701,9 +769,7 @@ final class AppModel: ObservableObject {
                         let isMySession = eventSessionID == self.selectedChatSessionID
 
                         if event.eventType == "chat.status" && isMySession {
-                            if let msg = event.payload?["message"]?.value, msg != "Done" {
-                                self.chatMessages.append(ChatMessage(role: "system", content: msg))
-                            }
+                            // Status messages are transient — don't add to chat history
                         } else if event.eventType == "chat.error" && isMySession {
                             self.isChatStreaming = false
                             if let err = event.payload?["error"]?.value {
@@ -711,12 +777,42 @@ final class AppModel: ObservableObject {
                             }
                         } else if event.eventType == "chat.stream" && isMySession {
                             let evtType = event.payload?["claude_event_type"]?.value ?? ""
-                            if evtType == "assistant", let text = event.payload?["text"]?.value, !text.isEmpty {
+                            if evtType == "tool_start" {
+                                // Tool call started — show tool name
+                                let tool = event.payload?["tool"]?.value ?? ""
+                                self.isAgentWorking = true
+                                self.chatMessages.append(ChatMessage(role: "tool", content: tool))
+                            } else if evtType == "tool_use" {
+                                // Tool call — update last tool message with detail
+                                let tool = event.payload?["tool"]?.value ?? ""
+                                let detail = event.payload?["detail"]?.value ?? ""
+                                if let lastIdx = self.chatMessages.indices.last,
+                                   self.chatMessages[lastIdx].role == "tool" {
+                                    self.chatMessages[lastIdx].content = "\(tool)\n\(detail)"
+                                }
+                            } else if evtType == "tool_result" {
+                                // Tool output — append to last tool message
+                                let content = event.payload?["content"]?.value ?? ""
+                                if !content.isEmpty, let lastIdx = self.chatMessages.indices.last,
+                                   self.chatMessages[lastIdx].role == "tool" {
+                                    self.chatMessages[lastIdx].content += "\n---\n\(content)"
+                                }
+                                self.isAgentWorking = false
+                            } else if evtType == "assistant", let text = event.payload?["text"]?.value, !text.isEmpty {
                                 if let lastIdx = self.chatMessages.indices.last,
                                    self.chatMessages[lastIdx].role == "assistant" && self.chatMessages[lastIdx].isStreaming {
                                     self.chatMessages[lastIdx].content += text
                                 } else {
                                     self.chatMessages.append(ChatMessage(role: "assistant", content: text, isStreaming: true))
+                                }
+                            } else if evtType == "agent_activity" {
+                                self.isAgentWorking = true
+                            } else if evtType == "agent_done" {
+                                self.isAgentWorking = false
+                                // Mark terminal message as done
+                                if let lastIdx = self.chatMessages.indices.last,
+                                   self.chatMessages[lastIdx].role == "terminal" {
+                                    self.chatMessages[lastIdx].isStreaming = false
                                 }
                             } else if evtType == "result" {
                                 if let lastIdx = self.chatMessages.indices.last,
@@ -724,7 +820,16 @@ final class AppModel: ObservableObject {
                                     self.chatMessages[lastIdx].isStreaming = false
                                 }
                                 self.isChatStreaming = false
+                                self.isAgentWorking = false
                             }
+                        } else if event.eventType == "chat.cancelled" && isMySession {
+                            self.isChatStreaming = false
+                            self.isAgentWorking = false
+                            if let lastIdx = self.chatMessages.indices.last,
+                               self.chatMessages[lastIdx].isStreaming {
+                                self.chatMessages[lastIdx].isStreaming = false
+                            }
+                            self.chatMessages.append(ChatMessage(role: "system", content: "Cancelled"))
                         } else if event.eventType == "chat.done" {
                             if isMySession {
                                 self.isChatStreaming = false
@@ -774,6 +879,19 @@ final class AppModel: ObservableObject {
             } catch {
                 statusMessage = "Realtime updates offline"
             }
+        }
+    }
+
+    static func toolIcon(_ tool: String) -> String {
+        switch tool {
+        case "Read": return ">"
+        case "Edit": return ">"
+        case "Write": return ">"
+        case "Bash": return "$"
+        case "Glob": return ">"
+        case "Grep": return ">"
+        case "Agent": return ">"
+        default: return ">"
         }
     }
 

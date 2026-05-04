@@ -274,6 +274,20 @@ struct APIClient {
         )
     }
 
+    func createVirtualProject(name: String) async throws -> ProjectInfo {
+        struct Body: Codable { let name: String }
+        return try await send("/projects", method: "POST", body: Body(name: name), response: ProjectInfo.self)
+    }
+
+    func cancelChatSession(sessionID: String) async throws {
+        _ = try await send(
+            "/chat/sessions/\(sessionID)/cancel",
+            method: "POST",
+            body: EmptyBody(),
+            response: ChatStatusResponse.self
+        )
+    }
+
     func eventRequest() throws -> URLRequest {
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
         components?.scheme = websocketScheme(for: baseURL.scheme ?? "http")
