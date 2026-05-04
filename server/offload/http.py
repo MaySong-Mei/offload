@@ -114,7 +114,9 @@ def make_handler():
                 self._write_json(HTTPStatus.OK, {"feedback_requests": self.server.service.list_feedback_queue()})
                 return
             if parsed.path == "/projects":
-                projects = [p.to_json_dict() for p in self.server.scanner.list_projects()]
+                repo_projects = self.server.scanner.list_projects()
+                virtual_projects = self.server.service.virtual_projects.list_projects()
+                projects = [p.to_json_dict() for p in repo_projects + virtual_projects]
                 self._write_json(HTTPStatus.OK, {"projects": projects})
                 return
             if parsed.path == "/projects/activity":
@@ -253,6 +255,40 @@ def make_handler():
             parsed = urlparse(self.path)
             payload = self._read_json_body()
             try:
+                # Virtual project management
+                if parsed.path == "/projects":
+                    name = payload.get("name", "")
+                    if not name:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'name'"})
+                        return
+                    repo_path = payload.get("repo_path")
+                    project = self.server.service.virtual_projects.create_project(name, repo_path)
+                    self._write_json(HTTPStatus.CREATED, project.to_json_dict())
+                    return
+                if parsed.path.startswith("/projects/") and len(parsed.path.split("/")) == 3:
+                    project_id = parsed.path.split("/")[2]
+                    result = self.server.service.virtual_projects.update_project(
+                        project_id, **{k: v for k, v in payload.items() if k in ("name", "repo_path", "summary")}
+                    )
+                    if result:
+                        self._write_json(HTTPStatus.OK, result.to_json_dict())
+                    else:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "Project not found"})
+                    return
+                # Move session to project
+                if parsed.path.startswith("/chat/sessions/") and parsed.path.endswith("/move"):
+                    parts = parsed.path.split("/")
+                    if len(parts) == 5:
+                        session_id = parts[3]
+                        new_project = payload.get("project")  # project id or None
+                        session = self.server.service.chat_manager.get_session(session_id)
+                        if session:
+                            session.project = new_project
+                            self.server.service.chat_manager._save_session(session)
+                            self._write_json(HTTPStatus.OK, session.to_summary())
+                        else:
+                            self._write_json(HTTPStatus.NOT_FOUND, {"error": "Session not found"})
+                        return
                 if parsed.path == "/chat/config":
                     api_key = payload.get("anthropic_api_key", "")
                     if api_key:

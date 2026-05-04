@@ -38,15 +38,15 @@ final class AppModel: ObservableObject {
     @Published var isAgentWorking = false
     @Published var lastSentMessage = ""  // for cancel → restore to input
 
-    /// Best-effort project path: current session's project → selected key → first initialized
-    var defaultProjectPath: String? {
+    /// Best-effort project ID: current session's project → selected key → first initialized
+    var defaultProjectID: String? {
         if let sid = selectedChatSessionID,
            let session = chatSessions.first(where: { $0.sessionId == sid }),
            let p = session.project, !p.isEmpty {
             return p
         }
         if let key = selectedProjectKey, !key.isEmpty { return key }
-        return projects.first(where: { $0.isInitialized })?.path
+        return projects.first(where: { $0.isInitialized })?.id
     }
 
     // Terminal
@@ -63,7 +63,7 @@ final class AppModel: ObservableObject {
         var groups: [String: (name: String, hasReadme: Bool, count: Int)] = [:]
         // Start from discovered projects (so empty repos still appear)
         for p in projects {
-            groups[p.path] = (p.name, p.hasReadme, 0)
+            groups[p.id] = (p.name, p.hasReadme, 0)
         }
         // Walk topics
         var ungroupedCount = 0
@@ -331,7 +331,7 @@ final class AppModel: ObservableObject {
         // Auto-create session if none selected
         if selectedChatSessionID == nil {
             do {
-                let project = defaultProjectPath
+                let project = defaultProjectID
                 let session = try await client.createChatSession(project: project)
                 chatSessions.insert(session, at: 0)
                 selectedChatSessionID = session.sessionId
@@ -651,7 +651,7 @@ final class AppModel: ObservableObject {
     func cancelInit(_ project: ProjectInfo) async {
         guard let client = makeClient() else { return }
         do {
-            try await client.cancelInit(projectPath: project.path)
+            try await client.cancelInit(projectPath: project.path ?? "")
             let fresh = try await client.fetchProjects()
             projects = fresh
         } catch {
@@ -663,11 +663,11 @@ final class AppModel: ObservableObject {
         guard let client = makeClient() else { return }
         do {
             // Server does the deletion; only update UI after server confirms success.
-            try await client.uninitializeProject(projectPath: project.path)
+            try await client.uninitializeProject(projectPath: project.path ?? "")
             // Reload from server — the real state after deletion.
             let fresh = try await client.fetchProjects()
             projects = fresh
-            projectInitLogs.removeValue(forKey: project.path)
+            projectInitLogs.removeValue(forKey: project.path ?? "" ?? "")
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -676,7 +676,7 @@ final class AppModel: ObservableObject {
     func initializeProject(_ project: ProjectInfo) async {
         guard let client = makeClient() else { return }
         do {
-            try await client.initializeProject(projectPath: project.path)
+            try await client.initializeProject(projectPath: project.path ?? "")
             // Reload once to get the authoritative "initializing" status.
             // From here, WebSocket events drive UI updates (no polling).
             if let fresh = try? await client.fetchProjects() {

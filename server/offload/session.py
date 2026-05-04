@@ -401,10 +401,8 @@ class OffloadSessionManager:
                     "instruction": prompt[:200],
                 }
 
-            # Start adapter in project directory (or home)
-            cwd = Path(session.project) if session.project else Path.home()
-            if not cwd.is_dir():
-                cwd = Path.home()
+            # Resolve cwd — repo path for repo projects, workspace for virtual, home for misc
+            cwd = self._resolve_cwd(session)
             adapter.start(cwd)
 
             self._publish(sid, "chat.stream", {
@@ -524,6 +522,24 @@ class OffloadSessionManager:
             if was_cancelled:
                 self._publish(sid, "chat.cancelled", {})
             self._publish(sid, "chat.done", {})
+
+    def _resolve_cwd(self, session: OffloadSession) -> Path:
+        """Resolve working directory for a session's project."""
+        if not session.project:
+            return self.workspace_root
+
+        # Virtual project — check if it has a bound repo
+        if session.project.startswith("vp-"):
+            from .projects import VirtualProjectManager
+            vpm = VirtualProjectManager(self.workspace_root)
+            repo_path = vpm.get_repo_path(session.project)
+            if repo_path and Path(repo_path).is_dir():
+                return Path(repo_path)
+            return self.workspace_root
+
+        # Path-based project (repo)
+        p = Path(session.project)
+        return p if p.is_dir() else self.workspace_root
 
     def _create_adapter(self, session: OffloadSession):
         """Create an adapter instance based on session config."""

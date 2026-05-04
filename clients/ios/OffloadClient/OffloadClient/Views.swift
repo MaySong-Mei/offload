@@ -230,39 +230,37 @@ private struct ChatSidebarView: View {
 
     private var projectSessions: [(project: String, name: String, sessions: [ChatSessionSummary])] {
         let grouped = Dictionary(grouping: model.chatSessions.filter { $0.project != nil }) { $0.project! }
-        return grouped.map { path, sessions in
-            let name = model.projects.first(where: { $0.path == path })?.name
-                ?? (path as NSString).lastPathComponent
-            return (project: path, name: name, sessions: sessions)
+        return grouped.map { projectId, sessions in
+            let name = model.projects.first(where: { $0.id == projectId })?.name
+                ?? (projectId as NSString).lastPathComponent
+            return (project: projectId, name: name, sessions: sessions)
         }
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    private var ideaSessions: [ChatSessionSummary] {
+    private var miscSessions: [ChatSessionSummary] {
         model.chatSessions.filter { $0.project == nil }
     }
 
-    @State private var expandedProjects: Set<String>? = nil  // nil = not yet initialized
+    @State private var expandedProjects: Set<String>? = nil
 
-    // Auto-expand projects that have sessions
     private var effectiveExpanded: Set<String> {
         if let manual = expandedProjects { return manual }
-        // Default: expand projects that have chat sessions
         return Set(model.chatSessions.compactMap { $0.project })
     }
 
-    private func projectSessionCount(for path: String) -> Int {
-        model.chatSessions.filter { $0.project == path }.count
+    private func projectSessionCount(for projectId: String) -> Int {
+        model.chatSessions.filter { $0.project == projectId }.count
     }
 
-    private func sessionsForProject(_ path: String) -> [ChatSessionSummary] {
-        model.chatSessions.filter { $0.project == path }
+    private func sessionsForProject(_ projectId: String) -> [ChatSessionSummary] {
+        model.chatSessions.filter { $0.project == projectId }
     }
 
-    private func projectName(for path: String?) -> String? {
-        guard let path else { return nil }
-        return model.projects.first(where: { $0.path == path })?.name
-            ?? (path as NSString).lastPathComponent
+    private func projectName(for projectId: String?) -> String? {
+        guard let projectId else { return nil }
+        return model.projects.first(where: { $0.id == projectId })?.name
+            ?? (projectId as NSString).lastPathComponent
     }
 
     @State private var showingDashboard = false
@@ -330,13 +328,13 @@ private struct ChatSidebarView: View {
                 if !model.projects.isEmpty {
                     Section {
                         ForEach(model.projects.filter { $0.isInitialized }) { project in
-                            let count = projectSessionCount(for: project.path)
-                            let isExpanded = effectiveExpanded.contains(project.path) || isExtended
+                            let count = projectSessionCount(for: project.id)
+                            let isExpanded = effectiveExpanded.contains(project.id) || isExtended
 
                             // Project row
                             HStack(spacing: 10) {
                                 Button {
-                                    onOpenProject(project.path, project.name)
+                                    onOpenProject(project.id, project.name)
                                 } label: {
                                     HStack(spacing: 8) {
                                         Image(systemName: "folder.fill")
@@ -363,10 +361,10 @@ private struct ChatSidebarView: View {
                                     Button {
                                         withAnimation(.easeInOut(duration: 0.2)) {
                                             var current = effectiveExpanded
-                                            if current.contains(project.path) {
-                                                current.remove(project.path)
+                                            if current.contains(project.id) {
+                                                current.remove(project.id)
                                             } else {
-                                                current.insert(project.path)
+                                                current.insert(project.id)
                                             }
                                             expandedProjects = current
                                         }
@@ -377,7 +375,7 @@ private struct ChatSidebarView: View {
                                                     .font(.caption2)
                                                     .foregroundStyle(.secondary)
                                             }
-                                            Image(systemName: effectiveExpanded.contains(project.path) ? "chevron.down" : "chevron.right")
+                                            Image(systemName: effectiveExpanded.contains(project.id) ? "chevron.down" : "chevron.right")
                                                 .font(.caption2)
                                                 .foregroundStyle(.tertiary)
                                         }
@@ -395,7 +393,7 @@ private struct ChatSidebarView: View {
 
                             // Sessions — auto-expanded in extended mode
                             if isExpanded {
-                                ForEach(sessionsForProject(project.path)) { session in
+                                ForEach(sessionsForProject(project.id)) { session in
                                     ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID)
                                         .padding(.leading, isExtended ? 28 : 20)
                                         .contentShape(Rectangle())
@@ -450,7 +448,7 @@ private struct ChatSidebarView: View {
                 Menu {
                     ForEach(model.projects) { project in
                         Button(project.name) {
-                            Task { await model.createChatSession(project: project.path) }
+                            Task { await model.createChatSession(project: project.id) }
                             onDismiss()
                         }
                     }
@@ -580,7 +578,7 @@ private struct RightPanelView: View {
                     Image(systemName: "folder.fill")
                         .font(.caption)
                         .foregroundStyle(Color.accentColor)
-                    Text(model.projects.first { $0.path == project }?.name ?? (project as NSString).lastPathComponent)
+                    Text(model.projects.first { $0.id == project }?.name ?? (project as NSString).lastPathComponent)
                         .font(.caption.weight(.medium))
                     Spacer()
                 }
@@ -806,7 +804,7 @@ private struct ProjectsView: View {
             Section {
                 ForEach(model.projects) { project in
                     ProjectCard(model: model, project: project)
-                        .tag(project.path)
+                        .tag(project.id)
                         .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                 }
             } header: {
@@ -879,12 +877,12 @@ private struct ProjectCard: View {
     @State private var showingFullLog = false
 
     private var topicCount: Int {
-        model.topics.filter { $0.project == project.path }.count
+        model.topics.filter { $0.project == project.id }.count
     }
 
     private var activeTopicCount: Int {
         model.topics.filter {
-            $0.project == project.path &&
+            $0.project == project.id &&
             ($0.executionState == .queued || $0.executionState == .implementing)
         }.count
     }
@@ -907,7 +905,7 @@ private struct ProjectCard: View {
                 }
                 .buttonStyle(.plain)
             }
-            InitLogPreview(log: model.projectInitLogs[project.path] ?? [], onTap: { showingFullLog = true })
+            InitLogPreview(log: model.projectInitLogs[project.id] ?? [], onTap: { showingFullLog = true })
         }
     }
 
@@ -923,7 +921,7 @@ private struct ProjectCard: View {
                     Text(project.name)
                         .font(.headline)
                         .lineLimit(1)
-                    Text(project.path)
+                    Text(project.path ?? project.id)
                         .font(.caption2.monospaced())
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
@@ -935,7 +933,7 @@ private struct ProjectCard: View {
                 if project.isInitialized || project.initStatus == "failed" {
                     Menu {
                         Button {
-                            model.openTerminal(for: project.path)
+                            model.openTerminal(for: project.path ?? project.id)
                         } label: {
                             Label("Open Terminal", systemImage: "terminal")
                         }
@@ -1076,7 +1074,7 @@ private struct ProjectDashboardView: View {
     private var projectName: String {
         if let key = model.selectedProjectKey {
             if key.isEmpty { return "Ungrouped" }
-            if let p = model.projects.first(where: { $0.path == key }) { return p.name }
+            if let p = model.projects.first(where: { $0.id == key }) { return p.name }
             return (key as NSString).lastPathComponent
         }
         return "Dashboard"
@@ -1084,7 +1082,7 @@ private struct ProjectDashboardView: View {
 
     private var selectedProject: ProjectInfo? {
         guard let key = model.selectedProjectKey else { return nil }
-        return model.projects.first { $0.path == key }
+        return model.projects.first { $0.id == key }
     }
 
     // --- Agent activity (used by meta card) ---
@@ -2379,7 +2377,7 @@ private struct InitLogSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     private var log: [String] {
-        model.projectInitLogs[project.path] ?? []
+        model.projectInitLogs[project.id] ?? []
     }
 
     var body: some View {
@@ -2863,7 +2861,7 @@ private struct NewTopicSheet: View {
                             Divider()
                             ForEach(model.projects) { p in
                                 Button {
-                                    project = p.path
+                                    project = p.id
                                 } label: {
                                     Label(p.name, systemImage: p.hasReadme ? "doc.text" : "folder")
                                 }
@@ -3993,8 +3991,8 @@ private struct ProjectPickerPill: View {
 
     private var displayLabel: String {
         if model.isChatStreaming { return "Thinking…" }
-        if let path = model.defaultProjectPath {
-            return model.projects.first { $0.path == path }?.name
+        if let path = model.defaultProjectID {
+            return model.projects.first { $0.id == path }?.name
                 ?? (path as NSString).lastPathComponent
         }
         return "Offload"
@@ -4026,7 +4024,7 @@ private struct ProjectPickerPill: View {
 
                 ForEach(model.projects.filter { $0.isInitialized }) { project in
                     Button {
-                        Task { await model.createChatSession(project: project.path) }
+                        Task { await model.createChatSession(project: project.id) }
                     } label: {
                         Label(project.name, systemImage: "folder.fill")
                     }

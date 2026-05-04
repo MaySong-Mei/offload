@@ -137,14 +137,17 @@ struct AnyCodable: Codable, Hashable {
 
 struct ProjectInfo: Codable, Identifiable, Hashable {
     let name: String
-    let path: String
+    let path: String?
     let hasReadme: Bool
     let isInitialized: Bool
     let initStatus: String
     let summary: String?
     let initError: String?
+    let isVirtual: Bool?
 
-    var id: String { path }
+    // Server sends "id" field; for repo projects it's the path
+    private let _id: String?
+    var id: String { _id ?? path ?? name }
 
     var statusLabel: String {
         switch initStatus {
@@ -153,6 +156,11 @@ struct ProjectInfo: Codable, Identifiable, Hashable {
         case "failed": return "Failed"
         default: return "Not Initialized"
         }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, path, hasReadme, isInitialized, initStatus, summary, initError, isVirtual
+        case _id = "id"
     }
 }
 

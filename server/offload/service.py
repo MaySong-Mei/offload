@@ -61,6 +61,8 @@ class HarnessService:
         self._project_paths = project_paths or []
         self.chat_manager = OffloadSessionManager(self.event_bus, self.workspace_root)
         self.sensor_runner = SensorRunner(self.store, self.event_bus, self._project_paths)
+        from .projects import VirtualProjectManager
+        self.virtual_projects = VirtualProjectManager(self.workspace_root)
         self.reindex()
 
     def start_sensors(self) -> None:
