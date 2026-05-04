@@ -226,36 +226,7 @@ private struct ChatSidebarView: View {
     @Binding var showingSettings: Bool
     var onDismiss: () -> Void
     var onOpenProject: (String, String) -> Void
-    var expandFraction: CGFloat = 0  // 0 = compact (300pt), 1 = full screen
-
-    private var projectSessions: [(project: String, name: String, sessions: [ChatSessionSummary])] {
-        let grouped = Dictionary(grouping: model.chatSessions.filter { $0.project != nil }) { $0.project! }
-        return grouped.map { projectId, sessions in
-            let name = model.projects.first(where: { $0.id == projectId })?.name
-                ?? (projectId as NSString).lastPathComponent
-            return (project: projectId, name: name, sessions: sessions)
-        }
-        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
-    private var miscSessions: [ChatSessionSummary] {
-        model.chatSessions.filter { $0.project == nil }
-    }
-
-    @State private var expandedProjects: Set<String>? = nil
-
-    private var effectiveExpanded: Set<String> {
-        if let manual = expandedProjects { return manual }
-        return Set(model.chatSessions.compactMap { $0.project })
-    }
-
-    private func projectSessionCount(for projectId: String) -> Int {
-        model.chatSessions.filter { $0.project == projectId }.count
-    }
-
-    private func sessionsForProject(_ projectId: String) -> [ChatSessionSummary] {
-        model.chatSessions.filter { $0.project == projectId }
-    }
+    var expandFraction: CGFloat = 0
 
     private func projectName(for projectId: String?) -> String? {
         guard let projectId else { return nil }
@@ -264,14 +235,12 @@ private struct ChatSidebarView: View {
     }
 
     @State private var showingDashboard = false
-    @State private var showingNewProject = false
-    @State private var newProjectName = ""
 
     private var isExtended: Bool { expandFraction > 0.5 }
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header — tappable to open dashboard
+            // Header
             Button {
                 showingDashboard = true
             } label: {
@@ -294,18 +263,6 @@ private struct ChatSidebarView: View {
                         Text(model.statusMessage)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        if isExtended {
-                            Text("·")
-                                .foregroundStyle(.tertiary)
-                            Text("\(model.projects.filter { $0.isInitialized }.count) projects")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text("·")
-                                .foregroundStyle(.tertiary)
-                            Text("\(model.chatSessions.count) chats")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
                         Spacer()
                         Image(systemName: "chevron.right")
                             .font(.caption2)
@@ -324,136 +281,24 @@ private struct ChatSidebarView: View {
                 ServerDashboardSheet(model: model)
             }
 
-            // Session list
+            // Flat timeline — all sessions by recency
             List {
-                // Projects section — all projects (repo + virtual)
-                Section {
-                    ForEach(model.projects) { project in
-                        let count = projectSessionCount(for: project.id)
-                        let isExpanded = effectiveExpanded.contains(project.id) || isExtended
-                        let isVirtual = project.isVirtual == true
-
-                        // Project row
-                        HStack(spacing: 10) {
-                            Button {
-                                if !isVirtual {
-                                    onOpenProject(project.id, project.name)
-                                }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: isVirtual ? "lightbulb" : "folder.fill")
-                                        .foregroundStyle(isVirtual ? .orange : Color.accentColor)
-                                        .font(isExtended ? .title3 : .body)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(project.name)
-                                            .font(isExtended ? .body.weight(.medium) : .subheadline)
-                                            .foregroundStyle(.primary)
-                                        if isExtended, let summary = project.summary, !summary.isEmpty {
-                                            Text(summary)
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                                .lineLimit(2)
-                                        }
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-
-                            Spacer()
-
-                            if !isExtended {
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        var current = effectiveExpanded
-                                        if current.contains(project.id) {
-                                            current.remove(project.id)
-                                        } else {
-                                            current.insert(project.id)
-                                        }
-                                        expandedProjects = current
-                                    }
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        if count > 0 {
-                                            Text("\(count)")
-                                                .font(.caption2)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        Image(systemName: effectiveExpanded.contains(project.id) ? "chevron.down" : "chevron.right")
-                                            .font(.caption2)
-                                            .foregroundStyle(.tertiary)
-                                    }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Color(.systemGray5), in: Capsule())
-                                }
-                                .buttonStyle(.plain)
-                            } else {
-                                Text("\(count) chats")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-
-                        // Sessions under project
-                        if isExpanded {
-                            ForEach(sessionsForProject(project.id)) { session in
-                                ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID)
-                                    .padding(.leading, isExtended ? 28 : 20)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        model.selectChatSession(session.sessionId)
-                                        onDismiss()
-                                    }
-                            }
-                        }
-                    }
-                } header: {
-                    HStack {
-                        Text("Projects")
-                        Spacer()
-                        Button {
-                            showingNewProject = true
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                // Misc — sessions without a project
-                if !miscSessions.isEmpty {
-                    Section {
-                        ForEach(miscSessions) { session in
-                            ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    model.selectChatSession(session.sessionId)
-                                    onDismiss()
-                                }
-                        }
-                    } header: {
-                        Text("Misc")
+                ForEach(model.chatSessions) { session in
+                    ChatSessionRow(
+                        session: session,
+                        isSelected: session.sessionId == model.selectedChatSessionID,
+                        projectName: projectName(for: session.project)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        model.selectChatSession(session.sessionId)
+                        onDismiss()
                     }
                 }
             }
             .listStyle(.plain)
-            .alert("New Project", isPresented: $showingNewProject) {
-                TextField("Project name", text: $newProjectName)
-                Button("Create") {
-                    let name = newProjectName.trimmingCharacters(in: .whitespaces)
-                    if !name.isEmpty {
-                        Task {
-                            await model.createProject(name: name)
-                            newProjectName = ""
-                        }
-                    }
-                }
-                Button("Cancel", role: .cancel) { newProjectName = "" }
-            }
 
-            // Bottom: New Chat button
+            // Bottom: New Chat
             HStack {
                 Spacer()
                 Button {
