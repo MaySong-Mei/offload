@@ -274,6 +274,11 @@ struct APIClient {
         )
     }
 
+    func createVirtualProject(name: String) async throws -> ProjectInfo {
+        struct Body: Codable { let name: String }
+        return try await send("/projects", method: "POST", body: Body(name: name), response: ProjectInfo.self)
+    }
+
     func cancelChatSession(sessionID: String) async throws {
         _ = try await send(
             "/chat/sessions/\(sessionID)/cancel",

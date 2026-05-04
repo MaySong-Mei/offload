@@ -308,6 +308,17 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func createProject(name: String) async {
+        guard let client = makeClient() else { return }
+        do {
+            struct Body: Codable { let name: String }
+            let project = try await client.createVirtualProject(name: name)
+            projects.append(project)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func cancelChat() async {
         guard let sessionID = selectedChatSessionID else { return }
         guard let client = makeClient() else { return }

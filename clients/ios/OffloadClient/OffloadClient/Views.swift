@@ -264,6 +264,8 @@ private struct ChatSidebarView: View {
     }
 
     @State private var showingDashboard = false
+    @State private var showingNewProject = false
+    @State private var newProjectName = ""
 
     private var isExtended: Bool { expandFraction > 0.5 }
 
@@ -324,106 +326,132 @@ private struct ChatSidebarView: View {
 
             // Session list
             List {
-                // Projects section
-                if !model.projects.isEmpty {
-                    Section {
-                        ForEach(model.projects.filter { $0.isInitialized }) { project in
-                            let count = projectSessionCount(for: project.id)
-                            let isExpanded = effectiveExpanded.contains(project.id) || isExtended
+                // Projects section — all projects (repo + virtual)
+                Section {
+                    ForEach(model.projects) { project in
+                        let count = projectSessionCount(for: project.id)
+                        let isExpanded = effectiveExpanded.contains(project.id) || isExtended
+                        let isVirtual = project.isVirtual == true
 
-                            // Project row
-                            HStack(spacing: 10) {
-                                Button {
+                        // Project row
+                        HStack(spacing: 10) {
+                            Button {
+                                if !isVirtual {
                                     onOpenProject(project.id, project.name)
-                                } label: {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "folder.fill")
-                                            .foregroundStyle(Color.accentColor)
-                                            .font(isExtended ? .title3 : .body)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(project.name)
-                                                .font(isExtended ? .body.weight(.medium) : .subheadline)
-                                                .foregroundStyle(.primary)
-                                            if isExtended, let summary = project.summary, !summary.isEmpty {
-                                                Text(summary)
-                                                    .font(.caption)
-                                                    .foregroundStyle(.secondary)
-                                                    .lineLimit(2)
-                                            }
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: isVirtual ? "lightbulb" : "folder.fill")
+                                        .foregroundStyle(isVirtual ? .orange : Color.accentColor)
+                                        .font(isExtended ? .title3 : .body)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(project.name)
+                                            .font(isExtended ? .body.weight(.medium) : .subheadline)
+                                            .foregroundStyle(.primary)
+                                        if isExtended, let summary = project.summary, !summary.isEmpty {
+                                            Text(summary)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(2)
                                         }
                                     }
+                                }
+                            }
+                            .buttonStyle(.plain)
+
+                            Spacer()
+
+                            if !isExtended {
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        var current = effectiveExpanded
+                                        if current.contains(project.id) {
+                                            current.remove(project.id)
+                                        } else {
+                                            current.insert(project.id)
+                                        }
+                                        expandedProjects = current
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        if count > 0 {
+                                            Text("\(count)")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Image(systemName: effectiveExpanded.contains(project.id) ? "chevron.down" : "chevron.right")
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color(.systemGray5), in: Capsule())
                                 }
                                 .buttonStyle(.plain)
-
-                                Spacer()
-
-                                if !isExtended {
-                                    Button {
-                                        withAnimation(.easeInOut(duration: 0.2)) {
-                                            var current = effectiveExpanded
-                                            if current.contains(project.id) {
-                                                current.remove(project.id)
-                                            } else {
-                                                current.insert(project.id)
-                                            }
-                                            expandedProjects = current
-                                        }
-                                    } label: {
-                                        HStack(spacing: 4) {
-                                            if count > 0 {
-                                                Text("\(count)")
-                                                    .font(.caption2)
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                            Image(systemName: effectiveExpanded.contains(project.id) ? "chevron.down" : "chevron.right")
-                                                .font(.caption2)
-                                                .foregroundStyle(.tertiary)
-                                        }
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(Color(.systemGray5), in: Capsule())
-                                    }
-                                    .buttonStyle(.plain)
-                                } else {
-                                    Text("\(count) chats")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-
-                            // Sessions — auto-expanded in extended mode
-                            if isExpanded {
-                                ForEach(sessionsForProject(project.id)) { session in
-                                    ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID)
-                                        .padding(.leading, isExtended ? 28 : 20)
-                                        .contentShape(Rectangle())
-                                        .onTapGesture {
-                                            model.selectChatSession(session.sessionId)
-                                            onDismiss()
-                                        }
-                                }
+                            } else {
+                                Text("\(count) chats")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
                         }
-                    } header: {
+
+                        // Sessions under project
+                        if isExpanded {
+                            ForEach(sessionsForProject(project.id)) { session in
+                                ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID)
+                                    .padding(.leading, isExtended ? 28 : 20)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        model.selectChatSession(session.sessionId)
+                                        onDismiss()
+                                    }
+                            }
+                        }
+                    }
+                } header: {
+                    HStack {
                         Text("Projects")
+                        Spacer()
+                        Button {
+                            showingNewProject = true
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
 
-                // Recents — all sessions sorted by most recent
-                Section {
-                    ForEach(model.chatSessions) { session in
-                        ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID, projectName: projectName(for: session.project))
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                model.selectChatSession(session.sessionId)
-                                onDismiss()
-                            }
+                // Misc — sessions without a project
+                if !miscSessions.isEmpty {
+                    Section {
+                        ForEach(miscSessions) { session in
+                            ChatSessionRow(session: session, isSelected: session.sessionId == model.selectedChatSessionID)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    model.selectChatSession(session.sessionId)
+                                    onDismiss()
+                                }
+                        }
+                    } header: {
+                        Text("Misc")
                     }
-                } header: {
-                    Text("Recents")
                 }
             }
             .listStyle(.plain)
+            .alert("New Project", isPresented: $showingNewProject) {
+                TextField("Project name", text: $newProjectName)
+                Button("Create") {
+                    let name = newProjectName.trimmingCharacters(in: .whitespaces)
+                    if !name.isEmpty {
+                        Task {
+                            await model.createProject(name: name)
+                            newProjectName = ""
+                        }
+                    }
+                }
+                Button("Cancel", role: .cancel) { newProjectName = "" }
+            }
 
             // Bottom: New Chat button
             HStack {
@@ -442,23 +470,6 @@ private struct ChatSidebarView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-
-            // Project chat menu
-            if !model.projects.isEmpty {
-                Menu {
-                    ForEach(model.projects) { project in
-                        Button(project.name) {
-                            Task { await model.createChatSession(project: project.id) }
-                            onDismiss()
-                        }
-                    }
-                } label: {
-                    Label("Project Chat", systemImage: "folder.badge.plus")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.bottom, 8)
-            }
         }
     }
 }
